@@ -46,8 +46,10 @@ function fft_pars() {
 
 }
 
+// this function is triggered from Max by the user
 function main() {
 
+	// get file names from source folder
 	var sourceFolder = new Folder(sourcePath);
 	sourceFolder.typelist = ["WAVE","AIFF"];
 	var filesIn = [];
@@ -58,6 +60,8 @@ function main() {
     if (VERBOSE) {
         post("FILES IN: ",filesIn, "\n");
     }
+
+	// get file names from output folder
 	var outFolder = new Folder(outputPath);
 	outFolder.typelist =  ["WAVE","AIFF"];
 	var filesOut = [];
@@ -66,6 +70,7 @@ function main() {
 		outFolder.next();
 	}
 
+	// analyse only files whose name can't be found in the output folder
 	filesAnal.length = 0;
 	for (var i = 0; i < filesIn.length; i++) {
 		if (!(filesOut.indexOf(filesIn[i]) >= 0)) {
@@ -73,17 +78,23 @@ function main() {
 		}
 	}
 
+	// activate function analyse
 	if (filesAnal.length == 0) {
 		post("NO FILES TO ANALYSE FOUND\n");
 	} else {
         if (VERBOSE) {
 		    post("FILES FOUND: ", filesAnal, "\n");
         }
-		analyse();
+		play_next();
 	}
 }
 
-function analyse() {
+// this function:
+//  selects an audiofile,
+// tells Max to load it on the source buffer,
+// prepares the output buffer to receive the fft data,
+// tells Max to play the audiofile
+function play_next() {
 	currentFileName = filesAnal.shift();
     if (VERBOSE) {
 	    post("READ file: ", sourcePath + currentFileName,"\n");
@@ -96,28 +107,45 @@ function analyse() {
 	BUF_OUT.poke(CH_AUDIO_L,0,BUF_SOURCE.peek(CH_AUDIO_L,0,BUF_SOURCE.framecount()));
 	var chToCopy = (nCh == 1) ? CH_AUDIO_L : CH_AUDIO_R;	
 	BUF_OUT.poke(CH_AUDIO_R,0,BUF_SOURCE.peek(chToCopy,0,BUF_SOURCE.framecount()));
-	start_play();
+	send_play();
 	
 }
 
 // this function makes a [fromsymbol] Max object put out a message to a [groove] object 
-function start_play() {
+function send_play() {
     this.patcher.getnamed("js_to_groove").message("0");
 }
 
+// this function is triggered from Max by the object [groove] when the playing index reaches the end of the audiofile
 function end_play() {
-	arrRMS = [];
-	arrCentroid = [];
+	get_rms(); // calculate rms from source buffer
+	
+
+	BUF_OUT.send("write", outputPath + currentFileName);
+
+	if (filesAnal.length == 0) {
+		post("ANALYSIS COMPLETED\n");
+	} else {
+		play_next();
+	}
+
+}
+
+function get_rms() {
+	var arrRMS = [];
+	var arrCentroid = [];
 	var i = 0;
 
+	var nCh = (BUF_SOURCE.channelcount() > 1) ? 2 : 1;
 	while (i < BUF_SOURCE.framecount() - (BUF_SOURCE.framecount() % FRAMESIZE)) {
 		
-		sumRms = 0; 
-		sumCentroid = 0;
-		sumCentroid_cnt = 0;
+		var sumRms = 0; 
+		//sumCentroid = 0;
+		//sumCentroid_cnt = 0;
 		//post(i, " to ", i + FRAMESIZE, "\n")
-		for (var j = i; j < i + FRAMESIZE; j++) {
-			sumRms += BUF_SOURCE.peek(1,j) * BUF_SOURCE.peek(1,j);
+		for (var j = i; j < i + FRAMESIZE; j++) { 
+			for (var k = 1; k <= nCh; k++) { 
+				sumRms += BUF_SOURCE.peek(k,j) * BUF_SOURCE.peek(k,j);
 			/*
 			sumCentroid += centrAnal.peek(1,j);
 			if (centrAnal.peek[1,j] != 0) {
@@ -125,7 +153,7 @@ function end_play() {
 			}
 			*/
 		}
-		arrRMS.push(Math.sqrt(sumRms / FRAMESIZE));
+		arrRMS.push(Math.sqrt((sumRms / FRAMESIZE)/nCh));
 		//arrCentroid.push(sumCentroid / sumCentroid_cnt);
 
 		i += FRAMESIZE;
@@ -135,13 +163,4 @@ function end_play() {
     }
 	BUF_OUT.poke(CH_RMS,0,arrRMS);
 	//BUF_OUT.poke(CH_CENTROID,0,arrCentroid);
-
-	BUF_OUT.send("write", outputPath + currentFileName);
-
-	if (filesAnal.length == 0) {
-		post("ANALYSIS COMPLETED\n");
-	} else {
-		analyse();
-	}
-
 }
