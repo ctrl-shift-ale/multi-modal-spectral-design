@@ -1,16 +1,15 @@
 from __future__ import division
 import numpy as np
 import soundfile as sf
-from scipy.signal import spectrogram
 import scipy.fftpack as fft
 import scipy.stats
 from sklearn import linear_model
 from . import timbral_util
+from pprint import pprint
 
-from pprint import pprint 
+FFTSIZE = 8192
 
-
-def warm_region_cal(audio_samples, fs):
+def warm_region_cal_dft(audio_samples, fs):
     """
       Function for calculating various warmth parameters.
 
@@ -20,10 +19,10 @@ def warm_region_cal(audio_samples, fs):
     :return:                four outputs: mean warmth region, weighted-average warmth region, mean high frequency level,
                             weighted-average high frequency level.
     """
-    #window the audio
+    # Window the audio
     windowed_samples = timbral_util.window_audio(audio_samples)
 
-    # need to define a function for the roughness stimuli, emphasising the 20 - 40 region (of the bark scale)
+    # Define a function for the roughness stimuli, emphasising the 20 - 40 region (of the bark scale)
     min_bark_band = 10
     max_bark_band = 40
     mean_bark_band = (min_bark_band + max_bark_band) / 2.0
@@ -35,7 +34,7 @@ def warm_region_cal(audio_samples, fs):
     wr_array = np.zeros(240)
     wr_array[min_bark_band:max_bark_band] = x
 
-    # need to define a second array emphasising the 20 - 40 region (of the bark scale)
+    # Define a second array emphasising the 20 - 40 region (of the bark scale)
     min_bark_band = 80
     max_bark_band = 240
     mean_bark_band = (min_bark_band + max_bark_band) / 2.0
@@ -57,7 +56,7 @@ def warm_region_cal(audio_samples, fs):
         samples = windowed_samples[i, :]
         N_entire, N_single = timbral_util.specific_loudness(samples, Pref=100.0, fs=fs, Mod=0)
 
-        # append the loudness spec
+        # Append the loudness spec
         windowed_loud_spec.append(N_single)
         windowed_rms.append(np.sqrt(np.mean(samples * samples)))
 
@@ -72,8 +71,8 @@ def warm_region_cal(audio_samples, fs):
     return mean_wr, weighted_wr, mean_hf, weighted_hf
 
 
-def timbral_warmth(fname, dev_output=False, phase_correction=False, clip_output=False, max_FFT_frame_size=1024,
-                   max_WR = 12000, fs=0, verbose=True):
+def timbral_warmth_dft(fname, dev_output=False, phase_correction=False, clip_output=False, max_FFT_frame_size=8192,
+                   max_WR=12000, fs=0, verbose=True):
     """
      This function estimates the perceptual Warmth of an audio file.
 
@@ -111,170 +110,155 @@ def timbral_warmth(fname, dev_output=False, phase_correction=False, clip_output=
 
     """
     if verbose:
-        print("~~~ function timbral_warmth ~~~")
+        print("Function Timbral_Warmth DFT")
 
     '''
       Read input
     '''
     audio_samples, fs = timbral_util.file_read(fname, fs, phase_correction=phase_correction)
 
-    # get the weighted high frequency content
-    mean_wr, _, _, weighted_hf = warm_region_cal(audio_samples, fs)
+    # Get the weighted high frequency content
+    mean_wr, _, _, weighted_hf = warm_region_cal_dft(audio_samples, fs)
 
-    if verbose:
-        print(f"\tMean warmth region: {mean_wr}")
-        print(f"\tWeighted-average high frequency level: {weighted_hf}")
-
-
-    # calculate the onsets
+    # Calculate the onsets
     envelope = timbral_util.sample_and_hold_envelope_calculation(audio_samples, fs, decay_time=0.1)
     envelope_time = np.arange(len(envelope)) / float(fs)
 
-    # calculate the onsets
+    # Calculate the onsets
     nperseg = 4096
     original_onsets = timbral_util.calculate_onsets(audio_samples, envelope, fs, nperseg=nperseg)
 
     if verbose:
-        print(f"\tOnsets array: {original_onsets}")
+        pprint(f"Original onsets: {original_onsets}")
 
     # If onsets don't exist, set it to time zero
     if not original_onsets:
         original_onsets = [0]
-    # set to start of file in the case where there is only one onset
+    # Set to start of file in the case where there is only one onset
     if len(original_onsets) == 1:
         original_onsets = [0]
+
     '''
       Initialise lists for storing features
     '''
-    # set defaults for holding
+    # Set defaults for holding
     all_rms = []
     all_ratio = []
     all_SC = []
     all_WR_Ratio = []
     all_decay_score = []
 
-
-    # calculate metrics for each onset
+    # Calculate metrics for each onset
     for idx, onset in enumerate(original_onsets):
+        
         if verbose:
-            print(f"\tonset n : {idx}")
+            pprint(f"onset n : {idx}")
 
         if onset == original_onsets[-1]:
-            # this is the last onset
+            # This is the last onset
             segment = audio_samples[onset:]
         else:
-            segment = audio_samples[onset:original_onsets[idx+1]]
+            segment = audio_samples[onset:original_onsets[idx + 1]]
 
         segment_rms = np.sqrt(np.mean(segment * segment))
         all_rms.append(segment_rms)
 
-        # get FFT of signal
-        segment_length = len(segment)
-        if segment_length < max_FFT_frame_size:
-            freq, time, spec = spectrogram(segment, fs, nperseg=segment_length, nfft=max_FFT_frame_size)
-        else:
-            freq, time, spec = spectrogram(segment, fs, nperseg=max_FFT_frame_size, nfft=max_FFT_frame_size)
-        if verbose:
-            pass
-            #pprint(f"FFT. FREQ: {freq} , LEN: {len(freq)}")
-            #pprint(f"FFT. TIME: {time} , LEN: {len(time)}")
-            #pprint(f"FFT. SPEC: {spec} , N frames: {len(spec)}, LEN per FRAME: {len(spec[0])}")
+        # Get FFT of signal
+        #segment = segment[:FFTSIZE]  # Trim to the first FFTSIZE samples
+        #segment = np.asarray(segment, dtype=np.float32)
+        #padded_segment = np.pad(segment, (0, max(0, FFTSIZE - len(segment))), mode='constant')
+        fft_magnitudes = np.abs(fft.fft(segment))
+        #fft_magnitudes = np.abs(fft.fft(segment))
+        fft_freqs = fft.fftfreq(len(segment), d=1.0 / fs)
 
-        # flatten the audio to 1 dimension.  Catches some strange errors that cause crashes
-        if spec.shape[1] > 1:
-            spec = np.sum(spec, axis=1)
-            spec = spec.flatten()
+        # Keep only positive frequencies (first half of the spectrum)
+        positive_freqs = fft_freqs[:len(fft_freqs) // 2]
+        positive_magnitudes = fft_magnitudes[:len(fft_freqs) // 2]
 
-        # normalise for this onset
-        spec = np.array(list(spec)).flatten()
-        this_shape = spec.shape
-        spec /= max(abs(spec))
+        #if verbose:
+        #    pprint(f"DFT. FREQ: {positive_freqs} , LEN: {len(positive_freqs)}")
+        #    pprint(f"DFT. MAGS: {positive_magnitudes} , LEN: {len(positive_magnitudes)}")
+
+        # Normalise for this onset
+        positive_magnitudes = np.array(list(positive_magnitudes)).flatten()
+        positive_magnitudes /= max(abs(positive_magnitudes))
 
         '''
           Estimate of fundamental frequency
         '''
-        # peak picking algorithm
-        peak_idx, peak_value, peak_x = timbral_util.detect_peaks(spec, freq=freq, fs=fs)
-        # find lowest peak
+        # Peak picking algorithm
+        peak_idx, peak_value, peak_x = timbral_util.detect_peaks(positive_magnitudes, freq=positive_freqs, fs=fs)
+        # Find lowest peak
         fundamental = np.min(peak_x)
         fundamental_idx = np.min(peak_idx)
-
-        if verbose:
-            print(f"\tFundamental : {fundamental} (idx: {fundamental_idx})")
 
         '''
          Warmth region calculation
         '''
-        # estimate the Warmth region
+        # Estimate the Warmth region
         WR_upper_f_limit = fundamental * 3.5
         if WR_upper_f_limit > max_WR:
             WR_upper_f_limit = 12000
-        tpower = np.sum(spec)
-        WR_upper_f_limit_idx = int(np.where(freq > WR_upper_f_limit)[0][0])
+        tpower = np.sum(positive_magnitudes)
+        #WR_upper_f_limit_idx = int(np.where(positive_freqs > WR_upper_f_limit)[0][0])
+        WR_upper_f_limit_idx_array = np.where(positive_freqs > WR_upper_f_limit)[0]
+        if len(WR_upper_f_limit_idx_array) > 0:
+            WR_upper_f_limit_idx = int(WR_upper_f_limit_idx_array[0])
+        else:
+            WR_upper_f_limit_idx = len(positive_freqs) - 1  # Set to the last index if no values found
+
 
         if fundamental < 260:
-            # find frequency bin closest to 260Hz
-            top_level_idx = int(np.where(freq > 260)[0][0])
-            # sum energy up to this bin
-            low_energy = np.sum(spec[fundamental_idx:top_level_idx])
-            # sum all energy
-            tpower = np.sum(spec)
-            # take ratio
+            # Find frequency bin closest to 260Hz
+            top_level_idx = int(np.where(positive_freqs > 260)[0][0])
+            # Sum energy up to this bin
+            low_energy = np.sum(positive_magnitudes[fundamental_idx:top_level_idx])
+            # Sum all energy
+            tpower = np.sum(positive_magnitudes)
+            # Take ratio
             ratio = low_energy / float(tpower)
         else:
-            # make exception where fundamental is greater than
+            # Make exception where fundamental is greater than
             ratio = 0
-        
-        if verbose:
-            print(f"\tRatio: {ratio}")
 
         all_ratio.append(ratio)
 
         '''
          Spectral centroid of the segment
         '''
-        # spectral centroid
-        top = np.sum(freq * spec)
-        bottom = float(np.sum(spec))
-        SC = np.sum(freq * spec) / float(np.sum(spec))
+        # Spectral centroid
+        SC = np.sum(positive_freqs * positive_magnitudes) / float(np.sum(positive_magnitudes))
         if verbose:
-            print(f"\tspectral centroid: {SC}")
+            pprint(f"spectral centroid (dft): {SC}")
         all_SC.append(SC)
 
         '''
          HF decay
          - linear regression of the values above the warmth region
         '''
-        above_WR_spec = np.log10(spec[WR_upper_f_limit_idx:])
-        above_WR_freq = np.log10(freq[WR_upper_f_limit_idx:])
+        above_WR_spec = np.log10(positive_magnitudes[WR_upper_f_limit_idx:])
+        #above_WR_freq = np.log10(positive_freqs[WR_upper_f_limit_idx:])
+        above_WR_freq = np.log10(np.clip(positive_freqs[WR_upper_f_limit_idx:], a_min=1e-10, a_max=None))
+
         np.ones_like(above_WR_freq)
         metrics = np.array([above_WR_freq, np.ones_like(above_WR_freq)])
 
-        # create a linear regression model
+        # Create a linear regression model
         model = linear_model.LinearRegression(fit_intercept=False)
         model.fit(metrics.transpose(), above_WR_spec)
         decay_score = model.score(metrics.transpose(), above_WR_spec)
-        
-        if verbose:
-            print(f"\tHF decay: {decay_score}")
-        
         all_decay_score.append(decay_score)
 
-
     '''
-     get mean values
+     Get mean values
     '''
     mean_SC = np.log10(np.mean(all_SC))
     mean_decay_score = np.mean(all_decay_score)
     weighted_mean_ratio = np.average(all_ratio, weights=all_rms)
-    if verbose:
-            print(f"\tMean centroid: {mean_SC}")
-            print(f"\tMean HF decay: {mean_decay_score}")
-            print(f"\tWeighted mean ratio: {weighted_mean_ratio}")
+
     if dev_output:
         return mean_SC, weighted_hf, mean_wr, mean_decay_score, weighted_mean_ratio
     else:
-
         '''
          Apply regression model
         '''
@@ -285,9 +269,6 @@ def timbral_warmth(fname, dev_output=False, phase_correction=False, clip_output=
         all_metrics[3] = mean_decay_score
         all_metrics[4] = weighted_mean_ratio
 
-        if verbose:
-            print(f"all metrics: {all_metrics}")
-
         coefficients = np.array([-4.464258317026696,
                                  -0.08819320850778556,
                                  0.29156539973575546,
@@ -295,13 +276,9 @@ def timbral_warmth(fname, dev_output=False, phase_correction=False, clip_output=
                                  8.403340066029507,
                                  45.21212125085579])
 
-        warmth = np.sum(all_metrics * coefficients)
+        warmth = np.sum(all_metrics * coefficients) 
 
-        if verbose:
-            print(f"\tWarmth: {warmth}")
-            print("~~~ end of function timbral_warmth ~~~\n")
-
-        # clip output between 0 and 100
+        # Clip output between 0 and 100
         if clip_output:
             warmth = timbral_util.output_clip(warmth)
 

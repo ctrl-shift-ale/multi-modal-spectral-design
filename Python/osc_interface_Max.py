@@ -3,7 +3,7 @@ from pythonosc import osc_server
 from pythonosc import osc_message_builder
 from pythonosc import udp_client
 
-from timbral_models import timbral_booming, timbral_brightness , timbral_depth , timbral_hardness , timbral_roughness , timbral_sharpness , timbral_warmth
+from timbral_models import timbral_booming, timbral_brightness , timbral_depth , timbral_hardness , timbral_roughness , timbral_sharpness , timbral_warmth, timbral_warmth_dft
 
 VERBOSE = True
 local_IP = "127.0.0.1" 
@@ -105,9 +105,12 @@ def handle_analyse(address, *args):
             try: 
                 if args[args.index('warmth') + 1] == 1:
                     warmth = timbral_warmth(file_)
+                    warmth_DFT = timbral_warmth_dft(file_)
                     if VERBOSE:
                         print(f'warmth: {warmth}')
+                        print(f'warmth (dft): {warmth_DFT}')
                     osc_content += ' warmth ' + str(warmth)
+                    osc_content += ' warmth-dft ' + str(warmth_DFT)
             except Exception as e: print(e)
         else:
             osc_content += ' warmth none'

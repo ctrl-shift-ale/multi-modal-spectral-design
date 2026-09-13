@@ -10,9 +10,20 @@
 		}
 ,
 		"classnamespace" : "box",
-		"rect" : [ 34.0, 77.0, 1468.0, 753.0 ],
+		"rect" : [ 134.0, 134.0, 1468.0, 753.0 ],
 		"gridsize" : [ 15.0, 15.0 ],
 		"boxes" : [ 			{
+				"box" : 				{
+					"id" : "obj-1",
+					"maxclass" : "newobj",
+					"numinlets" : 1,
+					"numoutlets" : 0,
+					"patching_rect" : [ 334.0, 544.0, 32.0, 22.0 ],
+					"text" : "print"
+				}
+
+			}
+, 			{
 				"box" : 				{
 					"id" : "obj-89",
 					"maxclass" : "button",
@@ -56,7 +67,7 @@
 					"numinlets" : 0,
 					"numoutlets" : 1,
 					"outlettype" : [ "" ],
-					"patching_rect" : [ 159.259254038333893, 269.962954342365265, 79.0, 22.0 ],
+					"patching_rect" : [ 71.0, 318.277767360210419, 79.0, 22.0 ],
 					"text" : "r to_udpsend"
 				}
 
@@ -241,7 +252,7 @@
 					"numoutlets" : 1,
 					"outlettype" : [ "" ],
 					"patching_rect" : [ 537.777760148048401, 664.444422662258148, 285.92591655254364, 36.0 ],
-					"text" : "booming 1 brightness 1 depth 1 hardness 1 roughness 1 sharpness 1 warmth 1"
+					"text" : "booming 0 brightness 0 depth 0 hardness 0 roughness 0 sharpness 0 warmth 1"
 				}
 
 			}
@@ -289,7 +300,6 @@
 					"numoutlets" : 1,
 					"outlettype" : [ "" ],
 					"patching_rect" : [ 780.481456518173218, 491.85183572769165, 81.0, 22.0 ],
-					"presentation_linecount" : 2,
 					"text" : "roughness $1"
 				}
 
@@ -326,7 +336,6 @@
 					"numoutlets" : 1,
 					"outlettype" : [ "" ],
 					"patching_rect" : [ 643.222200512886047, 522.222205102443695, 81.0, 22.0 ],
-					"presentation_linecount" : 2,
 					"text" : "brightness $1"
 				}
 
@@ -527,7 +536,7 @@
 					"numoutlets" : 1,
 					"outlettype" : [ "" ],
 					"patching_rect" : [ 320.338990688323975, 325.925915241241455, 149.067797660827637, 22.0 ],
-					"text" : "1 1 0 1 0 1 0 0"
+					"text" : "0 0 0 0 0 0 0 1"
 				}
 
 			}
@@ -544,7 +553,7 @@
 					"parameter_enable" : 0,
 					"patching_rect" : [ 508.474588394165039, 120.888881385326385, 107.627121210098267, 114.0 ],
 					"size" : 8,
-					"values" : [ 1, 1, 1, 1, 1, 1, 1, 1 ]
+					"values" : [ 0, 0, 0, 0, 0, 0, 0, 1 ]
 				}
 
 			}
@@ -557,7 +566,7 @@
 					"numoutlets" : 1,
 					"outlettype" : [ "" ],
 					"patching_rect" : [ 35.296295762062073, 707.627135515213013, 142.96295827627182, 105.0 ],
-					"text" : "/analyse file C:/Projects/SpectralDesign/samples/Bassoon_A3_MF.wav booming 1 brightness 1 depth 1 hardness 1 roughness 1 sharpness 1 warmth 1"
+					"text" : "/analyse file C:/Projects/SpectralDesign/samples/Bassoon_G3_MF.wav booming 0 brightness 0 depth 0 hardness 0 roughness 0 sharpness 0 warmth 1"
 				}
 
 			}
@@ -599,13 +608,13 @@
 , 			{
 				"box" : 				{
 					"id" : "obj-10",
-					"linecount" : 9,
+					"linecount" : 4,
 					"maxclass" : "message",
 					"numinlets" : 2,
 					"numoutlets" : 1,
 					"outlettype" : [ "" ],
-					"patching_rect" : [ 204.593224763870239, 451.111096322536469, 264.813563585281372, 133.0 ],
-					"text" : "/return-analysis \"file C:/Projects/SpectralDesign/samples/Bassoon_A3_MF.wav  booming 16.329685922000372 brightness 49.14297225770548 depth 39.321611233215044 hardness 36.92350231718581 roughness 36.37779431543736 sharpness 32.04805498759077 warmth 48.435786702534315\""
+					"patching_rect" : [ 204.593224763870239, 451.111096322536469, 265.0, 64.0 ],
+					"text" : "/return-analysis \"file C:/Projects/SpectralDesign/samples/Bassoon_G3_MF.wav  warmth 48.47749007558091 warmth-dft 46.40748824535054\""
 				}
 
 			}
@@ -951,7 +960,16 @@
 			}
 , 			{
 				"patchline" : 				{
+					"destination" : [ "obj-1", 0 ],
+					"order" : 1,
+					"source" : [ "obj-8", 0 ]
+				}
+
+			}
+, 			{
+				"patchline" : 				{
 					"destination" : [ "obj-10", 1 ],
+					"order" : 0,
 					"source" : [ "obj-8", 0 ]
 				}
 
@@ -1008,7 +1026,7 @@
 
 			}
  ],
-		"originid" : "pat-43",
+		"originid" : "pat-6",
 		"dependency_cache" : [  ],
 		"autosave" : 0
 	}
