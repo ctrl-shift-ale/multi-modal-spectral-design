@@ -20,40 +20,35 @@ the "spectral strategies" idea (e.g. "prioritise the most psychoacoustically
 significant harmonics" becomes concrete: the bands with the highest
 measured sensitivity for the parameters in play).
 
-No GUI. No Max/OSC. Everything you'd want to change to test a scenario is
-in the CONFIG block directly below -- edit and re-run.
+No GUI. No Max/OSC. All user-editable settings live in config.py -- edit
+that file, then re-run this one.
 """
 
 import time
 
 import numpy as np
 
-from timbral_target import TONAL_AUDIO_PATH, load_tonal, analyse
+from timbral_target import TONAL_AUDIO_PATH, load_tonal, analyse, PARAM_NAMES
 from spectral_optimizer import N_BANDS, band_edges, apply_band_gains, GAIN_MIN, GAIN_MAX
+from config import PERTURBATION
 
 
 # ============================================================
-# CONFIG — edit everything below this line to test a scenario
+# Core functions — shouldn't need to touch below here to test scenarios.
+# All the values that WOULD normally need editing live in config.py.
 # ============================================================
 
-# How far up/down from baseline (1.0 = unchanged) to nudge each band's
-# gain when probing it. Bigger = a stronger, easier-to-see signal, but
-# also a less "local" measurement (less like a true derivative, more
-# like a coarse average over a wide swing). 0.3 means testing gains of
-# 0.7 and 1.3 for each band in turn.
-PERTURBATION = 0.3
-
-PARAM_NAMES = ["warmth", "brightness", "depth", "hardness", "roughness", "sharpness", "booming"]
-
-
-# ============================================================
-# Core functions — shouldn't need to touch below here to test scenarios
-# ============================================================
-
-def measure_sensitivity(tonal_audio: np.ndarray, fs: int) -> np.ndarray:
+def measure_sensitivity(tonal_audio: np.ndarray, fs: int, priorities: dict = None) -> np.ndarray:
     """Returns an (N_BANDS x 7) matrix. matrix[i, j] = how much parameter j
     changes per unit change in band i's gain (a measured slope), using a
-    central-difference probe (up vs down) around baseline."""
+    central-difference probe (up vs down) around baseline.
+
+    priorities: optional, passed straight through to analyse() -- skips
+    computing (and therefore measuring sensitivity for) any priority<=0
+    parameter, leaving its column at 0. That's safe: priority_optimizer.py's
+    compute_band_relevance() never reads a column for a priority<=0
+    parameter anyway (see is_active()), so a column of zeros there costs
+    nothing and is never mistaken for "not sensitive"."""
     gain_up = 1.0 + PERTURBATION
     gain_down = max(GAIN_MIN, 1.0 - PERTURBATION)
     gain_span = gain_up - gain_down  # denominator for the slope
@@ -69,10 +64,12 @@ def measure_sensitivity(tonal_audio: np.ndarray, fs: int) -> np.ndarray:
         edited_up = apply_band_gains(tonal_audio, fs, gains_up)
         edited_down = apply_band_gains(tonal_audio, fs, gains_down)
 
-        achieved_up = analyse(edited_up, fs)
-        achieved_down = analyse(edited_down, fs)
+        achieved_up = analyse(edited_up, fs, priorities=priorities)
+        achieved_down = analyse(edited_down, fs, priorities=priorities)
 
         for param_j, name in enumerate(PARAM_NAMES):
+            if achieved_up[name] is None or achieved_down[name] is None:
+                continue  # priority 0 -- skipped, left at 0.0
             matrix[band_i, param_j] = (achieved_up[name] - achieved_down[name]) / gain_span
 
     return matrix

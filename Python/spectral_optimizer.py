@@ -18,9 +18,8 @@ harmonic-level editing exists, it slots in as a drop-in replacement for
 apply_band_gains() below; nothing in the objective function or the search
 loop itself needs to change.
 
-No GUI. No Max/OSC. Everything you'd want to change to test a scenario is
-in the CONFIG block directly below (plus TARGETS/PRIORITIES, which live in
-timbral_target.py) -- edit and re-run.
+No GUI. No Max/OSC. All user-editable settings live in config.py -- edit
+that file, then re-run this one.
 """
 
 import numpy as np
@@ -29,61 +28,21 @@ from scipy.signal import stft, istft
 from scipy.optimize import minimize
 
 from timbral_target import (
-    REPO_ROOT,
     TONAL_AUDIO_PATH,
     TARGETS,
     PRIORITIES,
+    TARGET_MODE,
     build_targets,
+    describe_target_resolution,
     analyse,
     total_error,
 )
+from config import N_BANDS, FMIN_HZ, GAIN_MIN, GAIN_MAX, MAX_ITER, FATOL, XATOL, NPERSEG, NOVERLAP, OUTPUT_AUDIO_PATH
 
 
 # ============================================================
-# CONFIG — edit everything below this line to test a scenario
-# ============================================================
-
-# Where to write the edited result so you can actually listen to it.
-OUTPUT_AUDIO_PATH = REPO_ROOT / "samples" / "Deconstructed" / "Bassoon_A3_MF" / "Bassoon_A3_MF_tonal_edited.wav"
-
-# How many frequency bands to split the spectrum into, log-spaced from
-# FMIN_HZ to Nyquist. More bands = finer control, but a bigger search space
-# for Nelder-Mead to explore -- and each evaluation of the objective
-# (spectral edit + all 7 timbral models) costs several seconds, so the
-# search-space size directly drives wall-clock runtime. Nelder-Mead needs
-# N_BANDS+1 evaluations just to build its starting simplex, before any
-# real searching happens. Start small and raise it once the loop itself is
-# proven out.
-N_BANDS = 6
-FMIN_HZ = 20.0
-
-# Per-band gain is a multiplier on magnitude (1.0 = unchanged). These bounds
-# stop the optimizer from finding a "solution" that silences a band
-# entirely or blows it out to absurd levels.
-GAIN_MIN = 0.1
-GAIN_MAX = 3.0
-
-# Search budget. Each objective evaluation is expensive (~4-6s on a typical
-# machine, dominated by the timbral models themselves, not the STFT edit) --
-# main() times one evaluation up front and prints an estimated worst-case
-# runtime before starting, so you can judge whether to raise or lower this
-# rather than finding out by waiting. Nelder-Mead does stop early if
-# fatol/xatol are satisfied, so actual runtime is often well under the
-# worst case.
-MAX_ITER = 60
-FATOL = 1e-5   # stop if total_error changes by less than this between steps
-XATOL = 1e-3   # stop if gain values change by less than this between steps
-
-# STFT window settings. 2048 @ typical 44.1/48kHz sample rates gives
-# ~20-40ms frames -- fine time resolution isn't the point here since we're
-# editing a whole sustained tone uniformly across its duration, not
-# shaping it over time.
-NPERSEG = 2048
-NOVERLAP = 1536
-
-
-# ============================================================
-# Core functions — shouldn't need to touch below here to test scenarios
+# Core functions — shouldn't need to touch below here to test scenarios.
+# All the values that WOULD normally need editing live in config.py.
 # ============================================================
 
 def band_edges(fs: int, n_bands: int = N_BANDS, fmin: float = FMIN_HZ) -> np.ndarray:
@@ -122,18 +81,26 @@ def make_objective(tonal_audio: np.ndarray, fs: int, targets: dict):
     audio/fs/targets so scipy.optimize only has to deal with the gains
     vector it's actually searching over.
 
+    Skips computing any priority<=0 parameter on every call (derived from
+    targets itself, so it always matches whatever priorities were actually
+    used to build targets) -- this is the hot loop, called potentially
+    hundreds of times, so avoiding a wasted model evaluation here is where
+    the real payoff is (unlike the one-off before/after reports, which
+    compute everything for full visibility).
+
     Memoized: Nelder-Mead (and our own progress callback) sometimes ask for
     the score at a point it's already evaluated. Each evaluation costs
     several seconds, so a plain dict cache keyed on the rounded gains
     avoids paying for that twice."""
     cache = {}
+    priorities_map = {name: t.priority for name, t in targets.items()}
 
     def objective(gains: np.ndarray) -> float:
         key = tuple(np.round(gains, 6))
         if key in cache:
             return cache[key]
         edited = apply_band_gains(tonal_audio, fs, gains)
-        achieved = analyse(edited, fs)
+        achieved = analyse(edited, fs, priorities=priorities_map)
         error = total_error(targets, achieved)
         cache[key] = error
         return error
@@ -181,10 +148,12 @@ def main():
         raise FileNotFoundError(f"TONAL_AUDIO_PATH not found: {TONAL_AUDIO_PATH}")
 
     tonal_audio, fs = load_tonal(TONAL_AUDIO_PATH)
-    targets = build_targets(TARGETS, PRIORITIES)
 
     print("--- before optimisation ---")
     starting_achieved = analyse(tonal_audio, fs)
+    targets = build_targets(TARGETS, PRIORITIES, baseline=starting_achieved)
+    describe_target_resolution(TARGETS, TARGET_MODE, starting_achieved)
+    print()
     report(targets, starting_achieved)
 
     # Time one real evaluation so the runtime estimate below is measured,

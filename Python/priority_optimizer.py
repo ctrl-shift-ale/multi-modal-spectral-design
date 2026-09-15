@@ -1,6 +1,10 @@
 """
 priority_optimizer.py
 
+This is the MAIN script to run -- it pulls in everything else:
+timbral_target.py (objective function), spectral_optimizer.py (band
+editing), and sensitivity_analysis.py (relevance ranking).
+
 Combines sensitivity_analysis.py with spectral_optimizer.py: instead of
 letting Nelder-Mead search over all N_BANDS blindly, first measure which
 bands actually move the parameters the user has set real targets for
@@ -22,9 +26,8 @@ Two direct benefits over the plain band-gain optimizer:
 Bands not selected are held fixed at gain 1.0 (unchanged), not removed
 from the signal.
 
-No GUI. No Max/OSC. Everything you'd want to change to test a scenario is
-in the CONFIG block directly below (plus TARGETS/PRIORITIES, which live in
-timbral_target.py) -- edit and re-run.
+No GUI. No Max/OSC. All user-editable settings live in config.py -- edit
+that file, then re-run this one.
 """
 
 import time
@@ -34,58 +37,46 @@ import soundfile as sf
 from scipy.optimize import minimize
 
 from timbral_target import (
-    REPO_ROOT,
     TONAL_AUDIO_PATH,
     TARGETS,
     PRIORITIES,
+    TARGET_MODE,
     load_tonal,
     build_targets,
+    describe_target_resolution,
     analyse,
     total_error,
     report,
+    PARAM_NAMES,
 )
 from spectral_optimizer import N_BANDS, band_edges, apply_band_gains, GAIN_MIN, GAIN_MAX
-from sensitivity_analysis import PARAM_NAMES, PERTURBATION, measure_sensitivity
+from sensitivity_analysis import PERTURBATION, measure_sensitivity
+from config import OUTPUT_AUDIO_PATH, TOP_K_BANDS, MAX_ITER, FATOL, XATOL
 
 
 # ============================================================
-# CONFIG — edit everything below this line to test a scenario
+# Core functions — shouldn't need to touch below here to test scenarios.
+# All the values that WOULD normally need editing live in config.py.
 # ============================================================
 
-OUTPUT_AUDIO_PATH = REPO_ROOT / "samples" / "Deconstructed" / "Bassoon_A3_MF" / "Bassoon_A3_MF_tonal_edited.wav"
-
-# How many of the N_BANDS bands (ranked by measured relevance) the
-# optimizer is actually allowed to touch. The rest stay fixed at gain 1.0.
-# Smaller = faster (fewer dimensions for Nelder-Mead to search) but less
-# flexible; this is the main lever for trading search quality vs runtime.
-TOP_K_BANDS = 3
-
-MAX_ITER = 60
-FATOL = 1e-5
-XATOL = 1e-3
-
-
-# ============================================================
-# Core functions — shouldn't need to touch below here to test scenarios
-# ============================================================
-
-def is_active(target_min: float, target_max: float, full_range: float = 100.0) -> bool:
-    """A target counts as 'active' (the user actually cares about it) if
-    its band is narrower than the full 0-100 native range. A (0, 100)
-    target can never contribute error (see TimbralTarget.raw_error), so
-    it shouldn't influence which bands get selected either."""
-    return (target_max - target_min) < full_range
+def is_active(target_min: float, target_max: float, priority: float, full_range: float = 100.0) -> bool:
+    """A target counts as 'active' (worth steering the search toward) only
+    if BOTH: its band is narrower than the full 0-100 native range (a
+    (0, 100) target can never contribute error), AND its priority is > 0
+    (priority 0 means the user explicitly doesn't want it influencing
+    anything, regardless of what range is set)."""
+    return (target_max - target_min) < full_range and priority > 0
 
 
 def compute_band_relevance(sensitivity_matrix: np.ndarray, targets: dict) -> np.ndarray:
     """relevance[band] = sum over ACTIVE parameters of priority * |sensitivity|.
     A band scores high if it strongly moves parameters the user actually
-    set a real (non-full-range) target for, weighted by how much they
-    said that parameter matters."""
+    set a real (non-full-range), priority>0 target for, weighted by how
+    much they said that parameter matters."""
     relevance = np.zeros(N_BANDS)
     for param_j, name in enumerate(PARAM_NAMES):
         t = targets[name]
-        if not is_active(t.target_min, t.target_max):
+        if not is_active(t.target_min, t.target_max, t.priority):
             continue
         relevance += t.priority * np.abs(sensitivity_matrix[:, param_j])
     return relevance
@@ -102,9 +93,13 @@ def select_bands(relevance: np.ndarray, top_k: int) -> np.ndarray:
 def make_restricted_objective(tonal_audio, fs, targets, active_bands: np.ndarray):
     """Same idea as spectral_optimizer.make_objective, but the function it
     returns only takes len(active_bands) parameters -- everything else
-    stays fixed at gain 1.0. Memoized for the same reason as before:
-    each evaluation is expensive, don't pay for the same point twice."""
+    stays fixed at gain 1.0. Also skips computing any priority<=0
+    parameter on every call, same reasoning as spectral_optimizer.py's
+    version -- this is the hot loop, so that's where skipping actually
+    saves real time. Memoized for the same reason as before: each
+    evaluation is expensive, don't pay for the same point twice."""
     cache = {}
+    priorities_map = {name: t.priority for name, t in targets.items()}
 
     def objective(sub_gains: np.ndarray) -> float:
         key = tuple(np.round(sub_gains, 6))
@@ -115,7 +110,7 @@ def make_restricted_objective(tonal_audio, fs, targets, active_bands: np.ndarray
         full_gains[active_bands] = sub_gains
 
         edited = apply_band_gains(tonal_audio, fs, full_gains)
-        achieved = analyse(edited, fs)
+        achieved = analyse(edited, fs, priorities=priorities_map)
         error = total_error(targets, achieved)
 
         cache[key] = error
@@ -161,15 +156,18 @@ def main():
         raise FileNotFoundError(f"TONAL_AUDIO_PATH not found: {TONAL_AUDIO_PATH}")
 
     tonal_audio, fs = load_tonal(TONAL_AUDIO_PATH)
-    targets = build_targets(TARGETS, PRIORITIES)
     edges = band_edges(fs, N_BANDS)
 
     print("--- before optimisation ---")
     starting_achieved = analyse(tonal_audio, fs)
+    targets = build_targets(TARGETS, PRIORITIES, baseline=starting_achieved)
+    describe_target_resolution(TARGETS, TARGET_MODE, starting_achieved)
+    print()
     report(targets, starting_achieved)
 
     print(f"\n--- measuring sensitivity ({N_BANDS} bands, perturbation ±{PERTURBATION}) ---")
-    sensitivity_matrix = measure_sensitivity(tonal_audio, fs)
+    priorities_map = {name: t.priority for name, t in targets.items()}
+    sensitivity_matrix = measure_sensitivity(tonal_audio, fs, priorities=priorities_map)
     relevance = compute_band_relevance(sensitivity_matrix, targets)
 
     print("\nband relevance (higher = matters more for your active targets):")
