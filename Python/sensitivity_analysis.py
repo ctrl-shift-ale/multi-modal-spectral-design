@@ -5,9 +5,9 @@ Answers: "which frequency bands actually move which timbral parameters,
 for THIS sound?" -- rather than guessing (e.g. assuming "sharpness = high
 frequencies") from general intuition.
 
-Method: for each band, nudge its gain up and down a little from baseline
-(1.0, i.e. unchanged) and measure how much each of the 7 timbral
-parameters moves in response. That gives a sensitivity value per
+Method: for each band, nudge its gain up and down a little (in dB) from
+baseline (0 dB, i.e. unchanged) and measure how much each of the 7
+timbral parameters moves in response. That gives a sensitivity value per
 (band, parameter) pair -- a measured slope, not an assumption. Negative
 means "raising this band's gain pushes the parameter down."
 
@@ -29,8 +29,8 @@ import time
 import numpy as np
 
 from timbral_target import TONAL_AUDIO_PATH, load_tonal, analyse, PARAM_NAMES
-from spectral_optimizer import N_BANDS, band_edges, apply_band_gains, GAIN_MIN, GAIN_MAX
-from config import PERTURBATION
+from spectral_optimizer import N_BANDS, band_edges, apply_band_gains, db_to_linear
+from config import PERTURBATION_DB, IDEAL_GAIN_MIN_DB, IDEAL_GAIN_MAX_DB
 
 
 # ============================================================
@@ -49,20 +49,20 @@ def measure_sensitivity(tonal_audio: np.ndarray, fs: int, priorities: dict = Non
     compute_band_relevance() never reads a column for a priority<=0
     parameter anyway (see is_active()), so a column of zeros there costs
     nothing and is never mistaken for "not sensitive"."""
-    gain_up = 1.0 + PERTURBATION
-    gain_down = max(GAIN_MIN, 1.0 - PERTURBATION)
-    gain_span = gain_up - gain_down  # denominator for the slope
+    gain_up_db = min(IDEAL_GAIN_MAX_DB, PERTURBATION_DB)
+    gain_down_db = max(IDEAL_GAIN_MIN_DB, -PERTURBATION_DB)
+    gain_span_db = gain_up_db - gain_down_db  # denominator for the slope, in dB now
 
     matrix = np.zeros((N_BANDS, len(PARAM_NAMES)))
 
     for band_i in range(N_BANDS):
-        gains_up = np.ones(N_BANDS)
-        gains_up[band_i] = min(GAIN_MAX, gain_up)
-        gains_down = np.ones(N_BANDS)
-        gains_down[band_i] = gain_down
+        gains_up_db = np.zeros(N_BANDS)
+        gains_up_db[band_i] = gain_up_db
+        gains_down_db = np.zeros(N_BANDS)
+        gains_down_db[band_i] = gain_down_db
 
-        edited_up = apply_band_gains(tonal_audio, fs, gains_up)
-        edited_down = apply_band_gains(tonal_audio, fs, gains_down)
+        edited_up = apply_band_gains(tonal_audio, fs, db_to_linear(gains_up_db))
+        edited_down = apply_band_gains(tonal_audio, fs, db_to_linear(gains_down_db))
 
         achieved_up = analyse(edited_up, fs, priorities=priorities)
         achieved_down = analyse(edited_down, fs, priorities=priorities)
@@ -70,7 +70,7 @@ def measure_sensitivity(tonal_audio: np.ndarray, fs: int, priorities: dict = Non
         for param_j, name in enumerate(PARAM_NAMES):
             if achieved_up[name] is None or achieved_down[name] is None:
                 continue  # priority 0 -- skipped, left at 0.0
-            matrix[band_i, param_j] = (achieved_up[name] - achieved_down[name]) / gain_span
+            matrix[band_i, param_j] = (achieved_up[name] - achieved_down[name]) / gain_span_db
 
     return matrix
 

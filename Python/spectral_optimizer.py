@@ -37,7 +37,7 @@ from timbral_target import (
     analyse,
     total_error,
 )
-from config import N_BANDS, FMIN_HZ, GAIN_MIN, GAIN_MAX, MAX_ITER, FATOL, XATOL, NPERSEG, NOVERLAP, OUTPUT_AUDIO_PATH
+from config import N_BANDS, FMIN_HZ, IDEAL_GAIN_MIN_DB, IDEAL_GAIN_MAX_DB, MAX_ITER, FATOL, XATOL, NPERSEG, NOVERLAP, OUTPUT_AUDIO_PATH
 
 
 # ============================================================
@@ -51,10 +51,29 @@ def band_edges(fs: int, n_bands: int = N_BANDS, fmin: float = FMIN_HZ) -> np.nda
     return np.geomspace(fmin, nyquist, n_bands + 1)
 
 
+def db_to_linear(gain_db) -> np.ndarray:
+    """Convert a gain (or array of gains) from dB to a linear amplitude
+    multiplier -- what apply_band_gains() actually needs, since it works
+    directly on STFT magnitudes. 0 dB -> 1.0 (unchanged)."""
+    return 10.0 ** (np.asarray(gain_db, dtype=float) / 20.0)
+
+
+def linear_to_db(gain_linear) -> np.ndarray:
+    """Convert a linear amplitude multiplier (or array of them) to dB.
+    Inverse of db_to_linear(). Clips away from zero first so a silenced
+    band (gain 0) doesn't send log10 to -inf."""
+    linear = np.clip(np.asarray(gain_linear, dtype=float), 1e-6, None)
+    return 20.0 * np.log10(linear)
+
+
 def apply_band_gains(audio: np.ndarray, fs: int, gains: np.ndarray) -> np.ndarray:
     """STFT the signal, multiply each frequency bin's magnitude by its
     band's gain (phase untouched), ISTFT back to audio. Same gain is
-    applied across the whole duration -- no time-varying shaping yet."""
+    applied across the whole duration -- no time-varying shaping yet.
+
+    `gains` here is LINEAR amplitude multipliers (1.0 = unchanged), not
+    dB -- everywhere else in the pipeline works in dB, so convert with
+    db_to_linear() first if that's what you're holding."""
     edges = band_edges(fs, len(gains))
     f, _, Zxx = stft(audio, fs=fs, nperseg=NPERSEG, noverlap=NOVERLAP)
 
@@ -95,11 +114,11 @@ def make_objective(tonal_audio: np.ndarray, fs: int, targets: dict):
     cache = {}
     priorities_map = {name: t.priority for name, t in targets.items()}
 
-    def objective(gains: np.ndarray) -> float:
-        key = tuple(np.round(gains, 6))
+    def objective(gains_db: np.ndarray) -> float:
+        key = tuple(np.round(gains_db, 6))
         if key in cache:
             return cache[key]
-        edited = apply_band_gains(tonal_audio, fs, gains)
+        edited = apply_band_gains(tonal_audio, fs, db_to_linear(gains_db))
         achieved = analyse(edited, fs, priorities=priorities_map)
         error = total_error(targets, achieved)
         cache[key] = error
@@ -109,12 +128,12 @@ def make_objective(tonal_audio: np.ndarray, fs: int, targets: dict):
 
 
 def run_optimizer(tonal_audio: np.ndarray, fs: int, targets: dict):
-    """Search for the per-band gains that minimise total_error. Returns
-    (best_gains, best_edited_audio, best_error, achieved_dict)."""
+    """Search for the per-band gains (dB) that minimise total_error. Returns
+    (best_gains_db, best_edited_audio, best_error, achieved_dict)."""
     objective = make_objective(tonal_audio, fs, targets)
 
-    x0 = np.ones(N_BANDS)
-    bounds = [(GAIN_MIN, GAIN_MAX)] * N_BANDS
+    x0 = np.zeros(N_BANDS)
+    bounds = [(IDEAL_GAIN_MIN_DB, IDEAL_GAIN_MAX_DB)] * N_BANDS
 
     history = []
 
@@ -132,12 +151,12 @@ def run_optimizer(tonal_audio: np.ndarray, fs: int, targets: dict):
         options={"maxiter": MAX_ITER, "fatol": FATOL, "xatol": XATOL},
     )
 
-    best_gains = result.x
-    best_edited = apply_band_gains(tonal_audio, fs, best_gains)
+    best_gains_db = result.x
+    best_edited = apply_band_gains(tonal_audio, fs, db_to_linear(best_gains_db))
     best_achieved = analyse(best_edited, fs)
     best_error = total_error(targets, best_achieved)
 
-    return best_gains, best_edited, best_error, best_achieved, result
+    return best_gains_db, best_edited, best_error, best_achieved, result
 
 
 def main():
@@ -161,7 +180,7 @@ def main():
     # regular objective evaluation, so it isn't wasted.
     probe_objective = make_objective(tonal_audio, fs, targets)
     t0 = time.time()
-    probe_objective(np.ones(N_BANDS))
+    probe_objective(np.zeros(N_BANDS))
     seconds_per_eval = time.time() - t0
 
     # Nelder-Mead needs N_BANDS+1 evaluations just for its starting simplex;
@@ -185,7 +204,7 @@ def main():
     report(targets, best_achieved)
 
     print(f"\nconverged: {result.success}  ({result.message})")
-    print("band gains:", np.round(best_gains, 3))
+    print("band gains, dB:", np.round(best_gains, 2))
 
     sf.write(OUTPUT_AUDIO_PATH, best_edited, fs)
     print(f"\nedited audio written to: {OUTPUT_AUDIO_PATH}")
