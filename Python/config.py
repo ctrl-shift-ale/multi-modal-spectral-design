@@ -103,13 +103,13 @@ TARGETS = {
 # sharpness" guarantee would need a different, lexicographic scheme --
 # not implemented.)
 PRIORITIES = {
-    "warmth":     1.0,
-    "brightness": 1.0,
-    "depth":      1.0,
-    "hardness":   1.0,
+    "warmth":     0.0,
+    "brightness": 0.0,
+    "depth":      0.0,
+    "hardness":   0.0,
     "roughness":  3.0,
-    "sharpness":  1.0,
-    "booming":    1.0,
+    "sharpness":  0.0,
+    "booming":    0.0,
 }
 
 
@@ -142,8 +142,8 @@ FMIN_HZ = 20.0
 #                        specific band(s) that actually need it, not
 #                        across the board.
 # Keep LIMITER at least as wide as IDEAL on both ends (checked below).
-IDEAL_GAIN_MIN_DB = -20.0
-IDEAL_GAIN_MAX_DB = 9.5
+IDEAL_GAIN_MIN_DB = -18.0
+IDEAL_GAIN_MAX_DB = 10.0
 
 LIMITER_GAIN_MIN_DB = -40.0
 LIMITER_GAIN_MAX_DB = 18.0
@@ -179,6 +179,19 @@ MAX_ITER = 100 # was 60
 FATOL = 1e-5   # stop if total_error changes by less than this between steps
 XATOL = 1e-3   # stop if gain values change by less than this between steps
 
+# How far apart (in dB) Nelder-Mead's starting simplex vertices are. This
+# MATTERS now that gains are dB and "unchanged" is 0: scipy's default
+# simplex step is ~5% of x0, which silently collapses to a near-zero
+# absolute step (0.00025) whenever x0 is exactly 0 in a dimension -- and
+# since every search here starts at 0 dB (or warm-starts from a previous
+# 0-dB-rooted search), that default was producing a simplex too flat to
+# register any real movement in the timbral models, so the search
+# "converged" after 1 iteration without actually searching. Passing an
+# explicit initial_simplex (see spectral_optimizer.build_initial_simplex)
+# sidesteps the problem outright regardless of how close to 0 dB the
+# starting point is.
+NELDER_MEAD_STEP_DB = 2.0
+
 
 # ============================================================
 # Priority-aware search (priority_optimizer.py)
@@ -196,7 +209,7 @@ XATOL = 1e-3   # stop if gain values change by less than this between steps
 # fixed top_k searches all of those equally, a ratio cutoff won't.
 # MIN_ACTIVE_BANDS / MAX_ACTIVE_BANDS are floor/ceiling guardrails so a
 # pathological run can't collapse to nothing or blow back up to everything.
-RELEVANCE_RATIO_THRESHOLD = 0.05   # drop anything more than 20x below the top band
+RELEVANCE_RATIO_THRESHOLD = 0.1   # drop anything more than 10x below the top band
 MIN_ACTIVE_BANDS = 2
 MAX_ACTIVE_BANDS = 6               # was: TOP_K_BANDS
 
@@ -220,4 +233,4 @@ WARMSTART_MAX_ITER = 30
 # like a coarse average over a wide swing). 3.0 means testing -3dB and
 # +3dB for each band in turn (roughly the old PERTURBATION=0.3's swing,
 # just expressed in dB now). Clamped to the ideal range, same as before.
-PERTURBATION_DB = 3.0
+PERTURBATION_DB = 1.0

@@ -37,7 +37,7 @@ from timbral_target import (
     analyse,
     total_error,
 )
-from config import N_BANDS, FMIN_HZ, IDEAL_GAIN_MIN_DB, IDEAL_GAIN_MAX_DB, MAX_ITER, FATOL, XATOL, NPERSEG, NOVERLAP, OUTPUT_AUDIO_PATH
+from config import N_BANDS, FMIN_HZ, IDEAL_GAIN_MIN_DB, IDEAL_GAIN_MAX_DB, NELDER_MEAD_STEP_DB, MAX_ITER, FATOL, XATOL, NPERSEG, NOVERLAP, OUTPUT_AUDIO_PATH
 
 
 # ============================================================
@@ -64,6 +64,29 @@ def linear_to_db(gain_linear) -> np.ndarray:
     band (gain 0) doesn't send log10 to -inf."""
     linear = np.clip(np.asarray(gain_linear, dtype=float), 1e-6, None)
     return 20.0 * np.log10(linear)
+
+
+def build_initial_simplex(x0: np.ndarray, step: float, bounds) -> np.ndarray:
+    """An explicit starting simplex for Nelder-Mead, sized in dB rather
+    than left to scipy's default (~5% of x0). That default quietly
+    degenerates to a near-zero absolute step whenever a dimension of x0
+    is exactly 0 -- which is exactly our normal starting point now that
+    "unchanged" is 0 dB rather than the old 1.0 linear gain -- producing
+    a simplex too flat to register any real change in the timbral models
+    and causing Nelder-Mead to "converge" after one iteration having
+    never actually moved. Each vertex nudges one dimension by `step`,
+    picking whichever direction (up or down) has more room before the
+    bound, then clips to the bound."""
+    x0 = np.asarray(x0, dtype=float)
+    n = len(x0)
+    simplex = np.tile(x0, (n + 1, 1))
+    for i in range(n):
+        lo, hi = bounds[i]
+        room_up = hi - x0[i]
+        room_down = x0[i] - lo
+        nudge = step if room_up >= room_down else -step
+        simplex[i + 1, i] = np.clip(x0[i] + nudge, lo, hi)
+    return simplex
 
 
 def apply_band_gains(audio: np.ndarray, fs: int, gains: np.ndarray) -> np.ndarray:
@@ -148,7 +171,10 @@ def run_optimizer(tonal_audio: np.ndarray, fs: int, targets: dict):
         method="Nelder-Mead",
         bounds=bounds,
         callback=callback,
-        options={"maxiter": MAX_ITER, "fatol": FATOL, "xatol": XATOL},
+        options={
+            "maxiter": MAX_ITER, "fatol": FATOL, "xatol": XATOL,
+            "initial_simplex": build_initial_simplex(x0, NELDER_MEAD_STEP_DB, bounds),
+        },
     )
 
     best_gains_db = result.x

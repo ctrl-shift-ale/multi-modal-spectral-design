@@ -49,8 +49,9 @@ from timbral_target import (
     total_error,
     report,
     PARAM_NAMES,
+    _fmt_num,
 )
-from spectral_optimizer import N_BANDS, band_edges, apply_band_gains, db_to_linear
+from spectral_optimizer import N_BANDS, band_edges, apply_band_gains, db_to_linear, build_initial_simplex
 from sensitivity_analysis import PERTURBATION_DB, measure_sensitivity
 from config import (
     OUTPUT_AUDIO_PATH,
@@ -58,6 +59,7 @@ from config import (
     WARMSTART_BANDS, WARMSTART_MAX_ITER,
     IDEAL_GAIN_MIN_DB, IDEAL_GAIN_MAX_DB,
     LIMITER_GAIN_MIN_DB, LIMITER_GAIN_MAX_DB, PINNED_EPSILON_DB,
+    NELDER_MEAD_STEP_DB,
     MAX_ITER, FATOL, XATOL,
 )
 
@@ -133,12 +135,16 @@ def warmstart_x0(tonal_audio, fs, targets, active_bands: np.ndarray, relevance: 
     warm_band_ids = active_bands[top_within_active]
 
     objective = make_restricted_objective(tonal_audio, fs, targets, warm_band_ids)
+    warm_bounds = [(IDEAL_GAIN_MIN_DB, IDEAL_GAIN_MAX_DB)] * n
     result = minimize(
         objective,
         np.zeros(n),
         method="Nelder-Mead",
-        bounds=[(IDEAL_GAIN_MIN_DB, IDEAL_GAIN_MAX_DB)] * n,
-        options={"maxiter": warmstart_max_iter, "fatol": FATOL, "xatol": XATOL},
+        bounds=warm_bounds,
+        options={
+            "maxiter": warmstart_max_iter, "fatol": FATOL, "xatol": XATOL,
+            "initial_simplex": build_initial_simplex(np.zeros(n), NELDER_MEAD_STEP_DB, warm_bounds),
+        },
     )
 
     x0[top_within_active] = result.x
@@ -209,7 +215,10 @@ def run_priority_optimizer(tonal_audio, fs, targets, active_bands: np.ndarray, r
             method="Nelder-Mead",
             bounds=bounds_pass,
             callback=callback,
-            options={"maxiter": MAX_ITER, "fatol": FATOL, "xatol": XATOL},
+            options={
+                "maxiter": MAX_ITER, "fatol": FATOL, "xatol": XATOL,
+                "initial_simplex": build_initial_simplex(x0_pass, NELDER_MEAD_STEP_DB, bounds_pass),
+            },
         )
 
     result = run_pass(x0, ideal_bounds)
@@ -219,6 +228,7 @@ def run_priority_optimizer(tonal_audio, fs, targets, active_bands: np.ndarray, r
         for g in result.x
     ])
 
+    escalated_band_ids = set()
     if pinned.any() and result.fun > 1e-9:
         pinned_labels = [f"band {active_bands[i]}" for i in range(k) if pinned[i]]
         print(
@@ -230,6 +240,7 @@ def run_priority_optimizer(tonal_audio, fs, targets, active_bands: np.ndarray, r
             (LIMITER_GAIN_MIN_DB, LIMITER_GAIN_MAX_DB) if pinned[i] else ideal_bounds[i]
             for i in range(k)
         ]
+        escalated_band_ids = {int(active_bands[i]) for i in range(k) if pinned[i]}
         result = run_pass(result.x, escalated_bounds, label="limiter")
 
     best_full_gains_db = np.zeros(N_BANDS)
@@ -238,7 +249,61 @@ def run_priority_optimizer(tonal_audio, fs, targets, active_bands: np.ndarray, r
     best_achieved = analyse(best_edited, fs)
     best_error = total_error(targets, best_achieved)
 
-    return best_full_gains_db, best_edited, best_error, best_achieved, result
+    return best_full_gains_db, best_edited, best_error, best_achieved, result, escalated_band_ids
+
+
+def print_run_summary(targets, starting_achieved, best_achieved, edges,
+                       active_bands, relevance, best_gains_db, escalated_band_ids):
+    """One consolidated block at the end of the run, instead of having to
+    piece the picture together from the scattered before/after reports and
+    the raw gains array: per-parameter source/target/achieved/error, and
+    per-band frequency range/relevance/final gain for every band the
+    search was actually allowed to touch. Two tables, not one -- there are
+    7 parameters and a different number of active bands, so cramming both
+    into one row-aligned table would misrepresent the data, not simplify it."""
+    print("\n" + "=" * 78)
+    print("RUN SUMMARY")
+    print("=" * 78)
+
+    print("\n-- parameters --")
+    header = f"{'parameter':<12}{'source':<10}{'target':<16}{'achieved':<10}{'hit?':<6}{'priority':<10}{'weighted err':<14}"
+    print(header)
+    print("-" * len(header))
+    for name in PARAM_NAMES:
+        t = targets[name]
+        src = starting_achieved.get(name)
+        val = best_achieved.get(name)
+        band = f"{_fmt_num(t.target_min)}-{_fmt_num(t.target_max)}"
+        src_str = f"{src:.2f}" if src is not None else "--"
+        if val is None:
+            print(f"{name:<12}{src_str:<10}{band:<16}{'--':<10}{'N/A':<6}{t.priority:<10.1f}{'0.00000':<14}")
+            continue
+        # priority 0 -- hit/miss is meaningless (never affects total_error
+        # regardless of where it lands), so N/A rather than a misleading
+        # yes/no.
+        if t.priority <= 0:
+            hit_str = "N/A"
+        else:
+            hit_str = "yes" if t.target_min <= val <= t.target_max else "no"
+        werr = t.weighted_error(val)
+        print(
+            f"{name:<12}{src_str:<10}{band:<16}{val:<10.2f}{hit_str:<6}"
+            f"{t.priority:<10.1f}{werr:<14.5f}"
+        )
+    print("-" * len(header))
+    print(f"TOTAL ERROR: {total_error(targets, best_achieved):.5f}")
+
+    print("\n-- active bands --")
+    bheader = f"{'band':<6}{'freq (Hz)':<18}{'relevance':<12}{'final gain (dB)':<18}{'range used':<12}"
+    print(bheader)
+    print("-" * len(bheader))
+    for i in active_bands:
+        i = int(i)
+        freq = f"{edges[i]:.0f}-{edges[i + 1]:.0f}"
+        rng = "limiter" if i in escalated_band_ids else "ideal"
+        print(f"{i:<6}{freq:<18}{relevance[i]:<12.3f}{best_gains_db[i]:<18.2f}{rng:<12}")
+    print("-" * len(bheader))
+    print(f"({N_BANDS - len(active_bands)} bands not selected, held fixed at 0 dB)")
 
 
 def main():
@@ -285,15 +350,16 @@ def main():
     )
 
     print(f"--- optimising ---")
-    best_gains, best_edited, best_error, best_achieved, result = run_priority_optimizer(
+    best_gains, best_edited, best_error, best_achieved, result, escalated_band_ids = run_priority_optimizer(
         tonal_audio, fs, targets, active_bands, relevance
     )
 
-    print("\n--- after optimisation ---")
-    report(targets, best_achieved)
-
     print(f"\nconverged: {result.success}  ({result.message})")
-    print("full band gains, dB (fixed bands shown as 0.0):", np.round(best_gains, 2))
+
+    print_run_summary(
+        targets, starting_achieved, best_achieved, edges,
+        active_bands, relevance, best_gains, escalated_band_ids,
+    )
 
     sf.write(OUTPUT_AUDIO_PATH, best_edited, fs)
     print(f"\nedited audio written to: {OUTPUT_AUDIO_PATH}")

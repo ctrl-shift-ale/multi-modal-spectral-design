@@ -243,12 +243,20 @@ def report(targets: dict, achieved: dict):
         band = f"{_fmt_num(t.target_min)}-{_fmt_num(t.target_max)}"
         if val is None:
             # priority 0 -- skipped during analyse(), never computed
-            print(f"{name:<12}{band:<16}{'--':<10}{'--':<6}{t.priority:<10.1f}{'0.00000':<14}")
+            print(f"{name:<12}{band:<16}{'--':<10}{'N/A':<6}{t.priority:<10.1f}{'0.00000':<14}")
             continue
-        hit = t.target_min <= val <= t.target_max
+        # priority 0 -- computed anyway (e.g. the diagnostic before/after
+        # reads, which call analyse() without priority-based skipping) but
+        # hit/miss is meaningless here: this parameter can never affect
+        # total_error regardless of where it lands, so N/A rather than a
+        # yes/no that implies it was ever being aimed at.
+        if t.priority <= 0:
+            hit_str = "N/A"
+        else:
+            hit_str = "yes" if t.target_min <= val <= t.target_max else "no"
         werr = t.weighted_error(val)
         print(
-            f"{name:<12}{band:<16}{val:<10.2f}{'yes' if hit else 'no':<6}"
+            f"{name:<12}{band:<16}{val:<10.2f}{hit_str:<6}"
             f"{t.priority:<10.1f}{werr:<14.5f}"
         )
 
