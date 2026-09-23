@@ -116,16 +116,71 @@ def select_bands(relevance: np.ndarray, ratio_threshold: float, min_bands: int, 
     return np.sort(kept)
 
 
-def warmstart_x0(tonal_audio, fs, targets, active_bands: np.ndarray, relevance: np.ndarray,
-                  warmstart_bands: int, warmstart_max_iter: int) -> np.ndarray:
-    """Quick low-dimensional pre-solve on just the most relevant of the
-    active bands, used to seed the full joint search's starting point
-    instead of 0 dB everywhere. Nelder-Mead's evaluation count is
-    sensitive to how close the initial simplex is to the optimum, so this
-    usually cuts iterations needed in the full search. Returns a vector
-    the same length as active_bands, in active_bands' order (band order,
-    not relevance order)."""
+def sensitivity_x0(active_bands: np.ndarray, sensitivity_matrix: np.ndarray, targets: dict,
+                    starting_achieved: dict) -> np.ndarray:
+    """First-order initial gain guess, one value per active band, computed
+    entirely from data ALREADY measured during sensitivity analysis --
+    zero extra objective evaluations. This replaces guessing blind from
+    0 dB: sensitivity_matrix[band, param] is a real measured slope (from
+    the +-PERTURBATION_DB probe around 0 dB in sensitivity_analysis.py),
+    i.e. exactly the "try a gain, see how much the error changes" data
+    point -- we already paid for it, we just weren't using it to aim
+    anywhere before.
+
+    For each band, this finds whichever ACTIVE (priority>0, real-range)
+    target parameter that band's measured sensitivity affects most, then
+    solves that local slope for the gain which would move the parameter
+    from its baseline value to the middle of its target band -- treating
+    the response as locally linear (a first-order approximation, not an
+    assumption that it's linear everywhere). Bands are solved
+    independently (each assuming every other band stays at 0 dB), so this
+    can't account for cross-band interaction -- that's what the joint
+    Nelder-Mead search downstream is for; this just starts it in the
+    right neighbourhood instead of at 0 dB. Clipped to the ideal range,
+    so a steep target that a small local slope implausibly extrapolates
+    past the bound (e.g. "raise this band 40 dB") lands exactly on that
+    bound instead -- which is the same as trying the extreme and seeing
+    what happens, just resolved analytically instead of by brute force."""
     x0 = np.zeros(len(active_bands))
+
+    for i, band in enumerate(active_bands):
+        best_name, best_slope = None, 0.0
+        for param_j, name in enumerate(PARAM_NAMES):
+            t = targets[name]
+            if not is_active(t.target_min, t.target_max, t.priority):
+                continue
+            slope = sensitivity_matrix[band, param_j]
+            if abs(slope) > abs(best_slope):
+                best_name, best_slope = name, slope
+
+        if best_name is None or abs(best_slope) < 1e-9:
+            continue  # nothing measurably active for this band -- leave at 0 dB
+
+        baseline = starting_achieved.get(best_name)
+        if baseline is None:
+            continue
+
+        t = targets[best_name]
+        target_mid = (t.target_min + t.target_max) / 2.0
+        gain_guess = (target_mid - baseline) / best_slope
+        x0[i] = np.clip(gain_guess, IDEAL_GAIN_MIN_DB, IDEAL_GAIN_MAX_DB)
+
+    return x0
+
+
+def warmstart_x0(tonal_audio, fs, targets, active_bands: np.ndarray, relevance: np.ndarray,
+                  warmstart_bands: int, warmstart_max_iter: int, x0_seed: np.ndarray = None) -> np.ndarray:
+    """Quick low-dimensional pre-solve on just the most relevant of the
+    active bands, used to REFINE the full joint search's starting point.
+    x0_seed (see sensitivity_x0) seeds every active band, not just the
+    ones this pre-solve searches directly -- bands outside warmstart_bands
+    pass through with their seed value untouched rather than reverting to
+    0 dB. Nelder-Mead's evaluation count is sensitive to how close the
+    initial simplex is to the optimum, so both this pre-solve AND seeding
+    it well (instead of starting from 0 dB) cut iterations needed in the
+    full search. Returns a vector the same length as active_bands, in
+    active_bands' order (band order, not relevance order)."""
+    x0 = np.zeros(len(active_bands)) if x0_seed is None else np.array(x0_seed, dtype=float)
     n = min(warmstart_bands, len(active_bands))
     if n <= 0:
         return x0
@@ -136,14 +191,15 @@ def warmstart_x0(tonal_audio, fs, targets, active_bands: np.ndarray, relevance: 
 
     objective = make_restricted_objective(tonal_audio, fs, targets, warm_band_ids)
     warm_bounds = [(IDEAL_GAIN_MIN_DB, IDEAL_GAIN_MAX_DB)] * n
+    x0_sub = x0[top_within_active]
     result = minimize(
         objective,
-        np.zeros(n),
+        x0_sub,
         method="Nelder-Mead",
         bounds=warm_bounds,
         options={
             "maxiter": warmstart_max_iter, "fatol": FATOL, "xatol": XATOL,
-            "initial_simplex": build_initial_simplex(np.zeros(n), NELDER_MEAD_STEP_DB, warm_bounds),
+            "initial_simplex": build_initial_simplex(x0_sub, NELDER_MEAD_STEP_DB, warm_bounds),
         },
     )
 
@@ -181,22 +237,36 @@ def make_restricted_objective(tonal_audio, fs, targets, active_bands: np.ndarray
     return objective
 
 
-def run_priority_optimizer(tonal_audio, fs, targets, active_bands: np.ndarray, relevance: np.ndarray):
+def run_priority_optimizer(tonal_audio, fs, targets, active_bands: np.ndarray, relevance: np.ndarray,
+                            sensitivity_matrix: np.ndarray, starting_achieved: dict):
     """Runs the joint search over active_bands within the ideal dB range
     first. If it converges with any band pinned against an ideal-range
     edge AND the target is still missed -- i.e. the ideal range is
     provably the thing standing in the way -- it retries, warm-started
     from that result, with the limiter range substituted in ONLY for the
     pinned band(s). A band that wasn't pinned, or whose target was
-    already hit, never sees the limiter range."""
+    already hit, never sees the limiter range.
+
+    The starting point for all of this is no longer 0 dB: sensitivity_x0()
+    first turns the sensitivity data already measured for these bands into
+    a direct per-band gain guess (0 extra evaluations), which warmstart_x0()
+    then refines with a short joint pre-solve on just the most relevant
+    bands. Both are just about getting the full search's starting simplex
+    close to the answer -- neither replaces it, since only the full joint
+    search actually accounts for how the active bands interact together."""
     objective = make_restricted_objective(tonal_audio, fs, targets, active_bands)
 
     k = len(active_bands)
+
+    x0 = sensitivity_x0(active_bands, sensitivity_matrix, targets, starting_achieved)
+    print(f"  first-order guess from existing sensitivity data: {np.round(x0, 2)} dB (0 extra evaluations)")
+
     if WARMSTART_BANDS > 0:
-        print(f"  warm-starting from a {min(WARMSTART_BANDS, k)}-band pre-solve...")
-        x0 = warmstart_x0(tonal_audio, fs, targets, active_bands, relevance, WARMSTART_BANDS, WARMSTART_MAX_ITER)
-    else:
-        x0 = np.zeros(k)
+        print(f"  refining with a {min(WARMSTART_BANDS, k)}-band pre-solve, seeded from that guess...")
+        x0 = warmstart_x0(
+            tonal_audio, fs, targets, active_bands, relevance,
+            WARMSTART_BANDS, WARMSTART_MAX_ITER, x0_seed=x0,
+        )
 
     ideal_bounds = [(IDEAL_GAIN_MIN_DB, IDEAL_GAIN_MAX_DB)] * k
 
@@ -351,7 +421,7 @@ def main():
 
     print(f"--- optimising ---")
     best_gains, best_edited, best_error, best_achieved, result, escalated_band_ids = run_priority_optimizer(
-        tonal_audio, fs, targets, active_bands, relevance
+        tonal_audio, fs, targets, active_bands, relevance, sensitivity_matrix, starting_achieved
     )
 
     print(f"\nconverged: {result.success}  ({result.message})")
