@@ -118,6 +118,39 @@ def apply_band_gains(audio: np.ndarray, fs: int, gains: np.ndarray) -> np.ndarra
     return edited.astype(audio.dtype)
 
 
+def mix_channels(tonal_audio: np.ndarray, fs: int, tonal_gains_db: np.ndarray,
+                  noise_audio: np.ndarray = None, noise_gains_db: np.ndarray = None) -> np.ndarray:
+    """Applies each channel's own per-band gains independently, then sums
+    the two edited channels in the sample domain. This is deliberately
+    NOT "edit tonal, ignore noise" -- the timbral models measure whatever
+    audio they're handed, and what's actually audible is the sum of both
+    components, not either one in isolation. Editing them independently
+    (rather than, say, applying one shared gain vector to both) is what
+    lets tonal and noise be shaped for different purposes -- e.g. taming
+    a noisy source's roughness without also having to touch its tonal
+    content, or the reverse.
+
+    noise_audio=None (no decomposed noise stem, or noise editing simply
+    not in use for this call) skips noise entirely and returns the edited
+    tonal signal alone -- this reproduces the tool's original tonal-only
+    behaviour exactly, so every existing tonal-only call site keeps
+    working unchanged. When noise_audio IS given, noise_gains_db must be
+    too.
+
+    Tonal and noise audio are expected to be the same length (two halves
+    of one decomposed source) -- if they aren't, this trims to the
+    shorter, rather than padding or erroring, on the theory that trailing
+    audio in the longer one is almost certainly measurement artefact, not
+    signal you'd want to keep half-mixed."""
+    tonal_edited = apply_band_gains(tonal_audio, fs, db_to_linear(tonal_gains_db))
+    if noise_audio is None:
+        return tonal_edited
+
+    noise_edited = apply_band_gains(noise_audio, fs, db_to_linear(noise_gains_db))
+    n = min(len(tonal_edited), len(noise_edited))
+    return tonal_edited[:n] + noise_edited[:n]
+
+
 def make_objective(tonal_audio: np.ndarray, fs: int, targets: dict):
     """Returns a function(gains) -> scalar error, closing over the fixed
     audio/fs/targets so scipy.optimize only has to deal with the gains

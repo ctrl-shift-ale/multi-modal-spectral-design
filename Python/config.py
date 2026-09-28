@@ -27,16 +27,23 @@ from pathlib import Path
 # backslash-escaping needed.
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# Tonal-only for now (see "Tonal vs. noise" below). Point this at your
-# real tonal split before running anything.
+# Point this at your real tonal split before running anything.
 TONAL_AUDIO_PATH = REPO_ROOT / "samples" / "Deconstructed" / "Bassoon_A3_MF" / "Bassoon_A3_MF_tonal.wav"
 
-# Not used yet -- kept here so the path is already in place for when noise
-# handling (and tonal/noise weighting) is built.
+# Optional. When this file exists, priority_optimizer.py edits it
+# alongside the tonal component -- its own independent per-band gains,
+# summed back with the edited tonal signal before anything is measured
+# (see spectral_optimizer.mix_channels()). When it doesn't exist (or its
+# sample rate doesn't match TONAL_AUDIO_PATH's), the tool falls back to
+# tonal-only automatically -- no config flag needed, nothing breaks for
+# a source that was never decomposed. This is what lets the SAME search
+# machinery cover a resonant musical note (tonal-dominant) and a field
+# recording or noisy sound design source (noise-dominant, maybe even
+# tonal-free) without treating either as the default case.
 NOISE_AUDIO_PATH = REPO_ROOT / "samples" / "Deconstructed" / "Bassoon_A3_MF" / "Bassoon_A3_MF_noise.wav"
 
 # Where the optimizers write the edited result so you can listen to it.
-OUTPUT_AUDIO_PATH = REPO_ROOT / "samples" / "Deconstructed" / "Bassoon_A3_MF" / "Bassoon_A3_MF_tonal_edited.wav"
+OUTPUT_AUDIO_PATH = REPO_ROOT / "samples" / "Deconstructed" / "Bassoon_A3_MF" / "Bassoon_A3_MF_edited.wav"
 
 
 # ============================================================
@@ -51,7 +58,8 @@ OUTPUT_AUDIO_PATH = REPO_ROOT / "samples" / "Deconstructed" / "Bassoon_A3_MF" / 
 #                 0-100 scale. (0, 100) means "don't care".
 #   "relative" -- each (min, max) is a DELTA range relative to the SOURCE
 #                 AUDIO's own measured value for that parameter (measured
-#                 by analysing TONAL_AUDIO_PATH before any editing).
+#                 by analysing TONAL_AUDIO_PATH -- plus NOISE_AUDIO_PATH,
+#                 summed in, when it exists -- before any editing).
 #                 e.g. warmth = (10, 20) means "10 to 20 points warmer
 #                 than the source sound, whatever that starts at";
 #                 hardness = (-40, -30) means "30 to 40 points lower than
@@ -209,6 +217,18 @@ NELDER_MEAD_STEP_DB = 2.0
 # fixed top_k searches all of those equally, a ratio cutoff won't.
 # MIN_ACTIVE_BANDS / MAX_ACTIVE_BANDS are floor/ceiling guardrails so a
 # pathological run can't collapse to nothing or blow back up to everything.
+#
+# When a decomposed noise stem is in play (see NOISE_AUDIO_PATH above),
+# this ratio/floor/ceiling selection runs over tonal+noise candidates
+# combined, and MAX_ACTIVE_BANDS bounds how many frequency REGIONS get
+# picked this way -- not the final candidate count. If a region's tonal
+# (or noise) candidate is picked and its sibling in the SAME region is
+# also measurably relevant (nonzero, even if far smaller), that sibling
+# is pulled in too, since the two get summed before anything is measured
+# -- shaping only one channel in a region the other channel also affects
+# would leave real headroom on the table (see select_bands() in
+# priority_optimizer.py). So the true number of active candidates can run
+# a bit past MAX_ACTIVE_BANDS once noise is active.
 RELEVANCE_RATIO_THRESHOLD = 0.1   # drop anything more than 10x below the top band
 MIN_ACTIVE_BANDS = 2
 MAX_ACTIVE_BANDS = 6               # was: TOP_K_BANDS

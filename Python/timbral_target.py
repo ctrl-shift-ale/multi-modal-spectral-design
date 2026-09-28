@@ -12,20 +12,22 @@ will try to minimise by changing the spectrum. Building and testing the
 objective function on its own first means we can trust the score before we
 ever start editing audio with it.
 
-TONAL ONLY, for now: the noise component is deliberately ignored at this
-stage of development, not deleted from the design. Planned future feature:
-let the user choose whether spectral edits prioritise the tonal or noise
-domain, or set a weighting/range between the two. Until that exists, mixing
-tonal + noise back together here would be pointless (see NOISE_AUDIO_PATH
-in config.py) -- if the tonal signal is going to be the only thing edited
-and analysed, feeding it noise-diluted would just distort the
-target-matching without buying anything.
+Tonal + noise: when a decomposed noise stem exists (NOISE_AUDIO_PATH in
+config.py), the pipeline edits it too -- its own independent per-band
+gains, summed back with the edited tonal signal before analyse() ever
+runs (see spectral_optimizer.mix_channels()), because that sum is the
+actual audible result the timbral models are meant to be measuring, not
+either stem in isolation. When no noise stem is available, everything
+here still works exactly as tonal-only -- load_noise() returns None for
+a missing file, and every function that takes a noise_audio argument
+treats None as "skip it," not an error.
 
 No GUI. No Max/OSC. All user-editable settings live in config.py -- edit
 that file, then re-run this one.
 """
 
 import os
+from pathlib import Path
 from dataclasses import dataclass
 
 import numpy as np
@@ -174,12 +176,27 @@ def describe_target_resolution(targets_raw: dict, mode: str = None, baseline: di
 
 
 def load_tonal(tonal_path) -> tuple:
-    """Load the tonal-only audio file. Noise handling deliberately excluded
-    for now -- see module docstring."""
+    """Load the tonal-only audio file."""
     tonal, sr = sf.read(tonal_path, always_2d=False)
     if tonal.ndim > 1:
         tonal = np.mean(tonal, axis=1)
     return tonal, sr
+
+
+def load_noise(noise_path) -> tuple:
+    """Load the decomposed noise-only audio file, same convention as
+    load_tonal(). Noise is OPTIONAL, unlike the tonal split: returns
+    (None, None) if noise_path is falsy or doesn't point at a real file,
+    rather than raising -- every downstream function that takes a
+    noise_audio argument treats None as "no noise component, behave
+    tonal-only," so a source with no decomposed noise stem (or none
+    provided) just works the way this tool always has."""
+    if not noise_path or not Path(noise_path).exists():
+        return None, None
+    noise, sr = sf.read(noise_path, always_2d=False)
+    if noise.ndim > 1:
+        noise = np.mean(noise, axis=1)
+    return noise, sr
 
 
 def analyse(audio: np.ndarray, fs: int, priorities: dict = None) -> dict:
