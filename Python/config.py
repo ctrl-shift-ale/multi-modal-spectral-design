@@ -43,7 +43,26 @@ TONAL_AUDIO_PATH = REPO_ROOT / "samples" / "Deconstructed" / "Bassoon_A3_MF" / "
 NOISE_AUDIO_PATH = REPO_ROOT / "samples" / "Deconstructed" / "Bassoon_A3_MF" / "Bassoon_A3_MF_noise.wav"
 
 # Where the optimizers write the edited result so you can listen to it.
-OUTPUT_AUDIO_PATH = REPO_ROOT / "samples" / "Deconstructed" / "Bassoon_A3_MF" / "Bassoon_A3_MF_edited.wav"
+OUTPUT_AUDIO_PATH = REPO_ROOT / "samples" / "Deconstructed" / "Bassoon_A3_MF" / "Bassoon_A3_MF_tonal_edited.wav"
+
+
+# ============================================================
+# Run mode (priority_optimizer.py)
+# ============================================================
+
+# "scan"  -- analysis only. Loads the audio (tonal + noise, summed if a
+#            decomposed noise stem is present -- same as everywhere else
+#            in this tool) and prints the 7 timbral models' raw values to
+#            the console. No targets, no sensitivity analysis, no search,
+#            no output file written -- just "where does this sound sit
+#            right now?". Useful before you've decided what TARGETS to
+#            set below, or just to check a sound.
+# "edit"  -- the full pipeline, as it's always worked: sensitivity
+#            analysis, priority-aware band selection, and the Nelder-Mead
+#            search against TARGETS/PRIORITIES below, writing the result
+#            to OUTPUT_AUDIO_PATH. This is the original, default behaviour.
+MODE = "edit"   # "scan" or "edit"
+assert MODE in ("scan", "edit"), f"MODE must be 'scan' or 'edit', got {MODE!r}"
 
 
 # ============================================================

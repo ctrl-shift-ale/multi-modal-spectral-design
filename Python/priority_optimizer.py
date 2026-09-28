@@ -55,7 +55,7 @@ from timbral_target import (
 from spectral_optimizer import N_BANDS, band_edges, mix_channels, build_initial_simplex
 from sensitivity_analysis import PERTURBATION_DB, measure_sensitivity
 from config import (
-    OUTPUT_AUDIO_PATH, NOISE_AUDIO_PATH,
+    MODE, OUTPUT_AUDIO_PATH, NOISE_AUDIO_PATH,
     RELEVANCE_RATIO_THRESHOLD, MIN_ACTIVE_BANDS, MAX_ACTIVE_BANDS,
     WARMSTART_BANDS, WARMSTART_MAX_ITER,
     IDEAL_GAIN_MIN_DB, IDEAL_GAIN_MAX_DB,
@@ -478,6 +478,33 @@ def print_run_summary(targets, starting_achieved, best_achieved, edges,
     print(f"({n_candidates - len(active_bands)} candidate(s) not selected, held fixed at 0 dB)")
 
 
+def run_scan(tonal_audio: np.ndarray, fs: int, noise_audio: np.ndarray = None):
+    """MODE="scan": the analysis half of the pipeline only -- no TARGETS,
+    no sensitivity probing, no search, nothing written to OUTPUT_AUDIO_PATH.
+    Just "where does this sound sit right now?", printed straight to the
+    console. Analyses the same signal edit mode would start from: tonal +
+    noise summed at 0 dB (unchanged) when a noise stem is active, tonal
+    alone otherwise -- via mix_channels(), same as main()'s baseline, so
+    a scan and the "source" row of an edit run always agree."""
+    noise_active = noise_audio is not None
+    audio = mix_channels(
+        tonal_audio, fs, np.zeros(N_BANDS),
+        noise_audio, np.zeros(N_BANDS) if noise_active else None,
+    )
+    achieved = analyse(audio, fs)
+
+    print("--- scan mode: analysis only (no targets, no search, no output file) ---\n")
+    print(f"tonal source: {TONAL_AUDIO_PATH}")
+    print(f"noise source: {NOISE_AUDIO_PATH if noise_active else '(none -- tonal-only)'}")
+    print(f"sample rate:  {fs} Hz\n")
+
+    header = f"{'parameter':<12}{'value':<10}"
+    print(header)
+    print("-" * len(header))
+    for name in PARAM_NAMES:
+        print(f"{name:<12}{achieved[name]:<10.2f}")
+
+
 def main():
     if not TONAL_AUDIO_PATH.exists():
         raise FileNotFoundError(f"TONAL_AUDIO_PATH not found: {TONAL_AUDIO_PATH}")
@@ -487,6 +514,11 @@ def main():
     if noise_audio is not None and noise_fs != fs:
         print(f"note: noise sample rate ({noise_fs} Hz) != tonal ({fs} Hz) -- ignoring noise component\n")
         noise_audio = None
+
+    if MODE == "scan":
+        run_scan(tonal_audio, fs, noise_audio)
+        return
+
     noise_active = noise_audio is not None
     n_candidates = N_BANDS * (2 if noise_active else 1)
     edges = band_edges(fs, N_BANDS)
