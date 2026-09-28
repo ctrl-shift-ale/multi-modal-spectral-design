@@ -273,3 +273,83 @@ WARMSTART_MAX_ITER = 30
 # +3dB for each band in turn (roughly the old PERTURBATION=0.3's swing,
 # just expressed in dB now). Clamped to the ideal range, same as before.
 PERTURBATION_DB = 1.0
+
+
+# ============================================================
+# Attack/decay-aware editing (attack_shaping.py, priority_optimizer.py)
+# ============================================================
+
+# hardness (timbral_hardness) is the one model, of the 7, whose formula
+# gives real weight to a short window right after the attack transient
+# specifically (its "attack centroid" -- verified against the real
+# timbral_models source, not assumed). Editing this tool has always done
+# is a single per-band gain applied uniformly across the WHOLE signal --
+# fine for every other parameter, since they're whole-signal or
+# per-note-segment averages, but wasteful for hardness: the same gain
+# change that shapes the attack window also reshapes the sustain/decay
+# equally, even when only the attack needed to move.
+#
+# So when (and only when) hardness is an active target (see is_active()
+# in priority_optimizer.py), a second search runs AFTER the normal
+# whole-signal search: it finds a separate set of band gains meant only
+# for the attack, then crosses that attack-edited signal into the
+# whole-signal edit over a short window, so the transition is inaudible.
+# Zero extra cost when hardness isn't active -- this pass is skipped
+# entirely.
+
+# Envelope resolution for attack/decay detection: ATTACK_ENVELOPE_HOP_MS
+# is the STEP between estimates (small, for precise placement),
+# ATTACK_ENVELOPE_WINDOW_MS is how much audio each RMS estimate actually
+# averages over (longer than the hop -- overlapping windows). The window
+# needs to be longer than the hop specifically so a low-pitched, sustained
+# fundamental (a bassoon's A3 is 220Hz -- about 4.5ms per cycle) doesn't
+# alias into a false "decay" ripple: a plain non-overlapping 5ms block
+# covers barely one cycle of a tone that low, and where each block happens
+# to start relative to the waveform's phase shifts its RMS by a fraction
+# of a dB block to block -- enough to look like real envelope movement.
+# Averaging over ~20ms instead covers several cycles even for a low
+# fundamental, so that phase-dependent wobble washes out.
+ATTACK_ENVELOPE_HOP_MS = 5.0
+ATTACK_ENVELOPE_WINDOW_MS = 20.0
+
+# The attack is considered to "start" once the envelope first rises above
+# this fraction of its own peak value (measured from a quiet lead-in) --
+# a simple, robust onset threshold rather than a fixed absolute level,
+# so it adapts to how loud the source recording happens to be.
+ATTACK_ONSET_THRESHOLD_FRAC = 0.05
+
+# Safety bound on how far past the detected onset to search for the
+# attack's peak (loudest point), in ms. Prevents a noisy or very slowly
+# swelling source from making the "attack" search run away.
+ATTACK_PEAK_SEARCH_MAX_MS = 500.0
+
+# Fallback crossfade anchor, used when no usable decay stage is found:
+# attack_start + this many ms. Matches timbral_hardness's own 125ms
+# attack-centroid integration window (measured from attack start, NOT
+# from the peak), so the fallback placement still overlaps the actual
+# window hardness's formula reads from.
+ATTACK_CENTROID_WINDOW_MS = 125.0
+
+# Fallback / minimum crossfade duration, in ms. Used whenever a decay
+# stage either isn't detected at all, or is detected but shorter than
+# this -- a crossfade forced into an unusably short window would sound
+# abrupt, so this floor takes over instead of shrinking to fit it.
+DEFAULT_XFADE_DURATION_MS = 80.0
+
+# Decay-stage detection: starting from the attack's peak, walk the
+# envelope hop by hop and track the change between consecutive hops.
+# The decay stage is however long that keeps changing; it's considered
+# "stabilised" (i.e. decay has ended, sustain has begun) once consecutive
+# hops stay within this many dB of each other...
+DECAY_STABILIZATION_TOLERANCE_DB = 0.5
+
+# ...for at least this many consecutive ms -- long enough that a brief,
+# incidental flat spot partway through a real decay doesn't get mistaken
+# for having reached the sustain plateau.
+DECAY_STABILIZATION_HOLD_MS = 50.0
+
+# How far past the peak to search for stabilisation before giving up and
+# falling back to ATTACK_CENTROID_WINDOW_MS / DEFAULT_XFADE_DURATION_MS
+# above -- covers a source with no real decay stage at all (a hard onset
+# straight into a flat sustain, or a one-shot that just keeps ringing).
+DECAY_SEARCH_MAX_MS = 500.0

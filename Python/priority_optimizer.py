@@ -54,6 +54,7 @@ from timbral_target import (
 )
 from spectral_optimizer import N_BANDS, band_edges, mix_channels, build_initial_simplex
 from sensitivity_analysis import PERTURBATION_DB, measure_sensitivity
+from attack_shaping import detect_attack_and_decay, crossfade_edit
 from config import (
     MODE, OUTPUT_AUDIO_PATH, NOISE_AUDIO_PATH,
     RELEVANCE_RATIO_THRESHOLD, MIN_ACTIVE_BANDS, MAX_ACTIVE_BANDS,
@@ -62,6 +63,7 @@ from config import (
     LIMITER_GAIN_MIN_DB, LIMITER_GAIN_MAX_DB, PINNED_EPSILON_DB,
     NELDER_MEAD_STEP_DB,
     MAX_ITER, FATOL, XATOL,
+    ATTACK_CENTROID_WINDOW_MS, DEFAULT_XFADE_DURATION_MS,
 )
 
 
@@ -315,6 +317,34 @@ def make_restricted_objective(tonal_audio, fs, targets, active_bands: np.ndarray
     return objective
 
 
+def run_search_pass(objective, x0_pass: np.ndarray, bounds_pass: list, label: str = None):
+    """Runs one Nelder-Mead search given an already-built objective,
+    starting point, and bounds -- prints a progress line per iteration.
+    Factored out of run_priority_optimizer() (rather than kept as a local
+    closure there) so refine_attack()'s second, attack-scoped search pass
+    can reuse the exact same search mechanics instead of duplicating
+    them."""
+    history = []
+
+    def callback(xk):
+        err = objective(xk)
+        history.append(err)
+        prefix = f"  [{label}] " if label else "  "
+        print(f"{prefix}iter {len(history):>4}  total_error = {err:.5f}")
+
+    return minimize(
+        objective,
+        x0_pass,
+        method="Nelder-Mead",
+        bounds=bounds_pass,
+        callback=callback,
+        options={
+            "maxiter": MAX_ITER, "fatol": FATOL, "xatol": XATOL,
+            "initial_simplex": build_initial_simplex(x0_pass, NELDER_MEAD_STEP_DB, bounds_pass),
+        },
+    )
+
+
 def run_priority_optimizer(tonal_audio, fs, targets, active_bands: np.ndarray, relevance: np.ndarray,
                             sensitivity_matrix: np.ndarray, starting_achieved: dict,
                             noise_audio: np.ndarray = None):
@@ -358,28 +388,7 @@ def run_priority_optimizer(tonal_audio, fs, targets, active_bands: np.ndarray, r
 
     ideal_bounds = [(IDEAL_GAIN_MIN_DB, IDEAL_GAIN_MAX_DB)] * k
 
-    def run_pass(x0_pass, bounds_pass, label=None):
-        history = []
-
-        def callback(xk):
-            err = objective(xk)
-            history.append(err)
-            prefix = f"  [{label}] " if label else "  "
-            print(f"{prefix}iter {len(history):>4}  total_error = {err:.5f}")
-
-        return minimize(
-            objective,
-            x0_pass,
-            method="Nelder-Mead",
-            bounds=bounds_pass,
-            callback=callback,
-            options={
-                "maxiter": MAX_ITER, "fatol": FATOL, "xatol": XATOL,
-                "initial_simplex": build_initial_simplex(x0_pass, NELDER_MEAD_STEP_DB, bounds_pass),
-            },
-        )
-
-    result = run_pass(x0, ideal_bounds)
+    result = run_search_pass(objective, x0, ideal_bounds)
 
     pinned = np.array([
         (abs(g - IDEAL_GAIN_MIN_DB) <= PINNED_EPSILON_DB) or (abs(g - IDEAL_GAIN_MAX_DB) <= PINNED_EPSILON_DB)
@@ -399,7 +408,7 @@ def run_priority_optimizer(tonal_audio, fs, targets, active_bands: np.ndarray, r
             for i in range(k)
         ]
         escalated_band_ids = {int(active_bands[i]) for i in range(k) if pinned[i]}
-        result = run_pass(result.x, escalated_bounds, label="limiter")
+        result = run_search_pass(objective, result.x, escalated_bounds, label="limiter")
 
     # best_full_gains_db is a flat candidate vector, same layout as
     # active_bands/relevance/sensitivity_matrix: [0, N_BANDS) tonal,
@@ -420,9 +429,96 @@ def run_priority_optimizer(tonal_audio, fs, targets, active_bands: np.ndarray, r
     return best_full_gains_db, best_edited, best_error, best_achieved, result, escalated_band_ids
 
 
+def refine_attack(tonal_audio, fs, targets, active_bands: np.ndarray, pass1_gains_db: np.ndarray,
+                   noise_audio: np.ndarray = None):
+    """Second search pass, run ONLY when hardness has a real (active)
+    target (see is_active() / main()) -- hardness is the one parameter,
+    of the 7, whose formula is attack-window-specific (see
+    attack_shaping.py's module docstring), so it's the only reason this
+    tool needs anything more than a single whole-signal edit.
+
+    Pass 1 (run_priority_optimizer(), already run by the time this is
+    called) found the best single gain vector for the WHOLE signal --
+    good for every parameter, including hardness's own whole-signal
+    features, but it can't move hardness's attack-specific feature any
+    further without also reshaping the sustain, which the rest of the
+    search already settled on being correct. This pass searches a SECOND
+    gain vector meant only for the attack, and composites it against
+    pass 1's finished edit via crossfade_edit() -- so what changes here
+    is confined to the attack, and everything pass 1 already got right
+    elsewhere is left alone.
+
+    Reuses active_bands/targets from pass 1 rather than re-selecting bands
+    from scratch: the bands already measured as relevant to the active
+    targets include hardness's own sensitivity (see
+    compute_band_relevance()), so there's no separate band-selection step
+    needed here -- same candidates, a second gain vector for them.
+
+    Attack/decay is detected on the BASELINE (unedited, 0dB-mixed) audio,
+    not on pass 1's edit -- the physical attack/decay structure being
+    located belongs to the original sound object, and shouldn't shift
+    just because pass 1 happened to reshape the envelope somewhat.
+
+    Returns (attack_gains_db, final_edited, final_error, final_achieved,
+    result, xfade_info) -- xfade_info is detect_attack_and_decay()'s own
+    dict, useful for the run summary."""
+    noise_active = noise_audio is not None
+    n_candidates = N_BANDS * (2 if noise_active else 1)
+
+    baseline_audio = mix_channels(
+        tonal_audio, fs, np.zeros(N_BANDS),
+        noise_audio, np.zeros(N_BANDS) if noise_active else None,
+    )
+    xfade_info = detect_attack_and_decay(baseline_audio, fs)
+
+    tonal_pass1_db = pass1_gains_db[:N_BANDS]
+    noise_pass1_db = pass1_gains_db[N_BANDS:] if noise_active else None
+
+    priorities_map = {name: t.priority for name, t in targets.items()}
+
+    def build_composite(sub_gains_db: np.ndarray) -> np.ndarray:
+        full_gains_db = np.zeros(n_candidates)
+        full_gains_db[active_bands] = sub_gains_db
+        tonal_attack_db = full_gains_db[:N_BANDS]
+        noise_attack_db = full_gains_db[N_BANDS:] if noise_active else None
+        return crossfade_edit(
+            tonal_audio, fs, tonal_attack_db, tonal_pass1_db,
+            noise_audio, noise_attack_db, noise_pass1_db,
+            xfade_info["xfade_start_idx"], xfade_info["xfade_duration_samples"],
+        )
+
+    cache = {}
+
+    def objective(sub_gains_db: np.ndarray) -> float:
+        key = tuple(np.round(sub_gains_db, 6))
+        if key in cache:
+            return cache[key]
+        composite = build_composite(sub_gains_db)
+        achieved = analyse(composite, fs, priorities=priorities_map)
+        error = total_error(targets, achieved)
+        cache[key] = error
+        return error
+
+    # Warm-started from pass 1's own gains, not 0 dB -- pass 1 is already
+    # a reasonable edit for the attack too, this pass only needs to find
+    # how much further to push it there specifically.
+    x0 = pass1_gains_db[active_bands]
+    bounds = [(IDEAL_GAIN_MIN_DB, IDEAL_GAIN_MAX_DB)] * len(active_bands)
+    result = run_search_pass(objective, x0, bounds, label="attack")
+
+    best_full_gains_db = np.zeros(n_candidates)
+    best_full_gains_db[active_bands] = result.x
+
+    final_edited = build_composite(result.x)
+    final_achieved = analyse(final_edited, fs)
+    final_error = total_error(targets, final_achieved)
+
+    return best_full_gains_db, final_edited, final_error, final_achieved, result, xfade_info
+
+
 def print_run_summary(targets, starting_achieved, best_achieved, edges,
                        active_bands, relevance, best_gains_db, escalated_band_ids,
-                       noise_active: bool = False):
+                       noise_active: bool = False, attack_info: dict = None):
     """One consolidated block at the end of the run, instead of having to
     piece the picture together from the scattered before/after reports and
     the raw gains array: per-parameter source/target/achieved/error, and
@@ -430,7 +526,15 @@ def print_run_summary(targets, starting_achieved, best_achieved, edges,
     every candidate the search was actually allowed to touch. Two tables,
     not one -- there are 7 parameters and a different number of active
     candidates, so cramming both into one row-aligned table would
-    misrepresent the data, not simplify it."""
+    misrepresent the data, not simplify it.
+
+    attack_info (only when hardness was active -- see refine_attack() /
+    main()) adds a third block reporting where the attack/decay was
+    detected (or that it fell back to config defaults), the crossfade
+    window, and the attack-only gains used inside it -- reported
+    separately from the whole-signal gains above rather than merged into
+    that table, since the two apply to different STRETCHES of the audio,
+    not the same one measured two ways."""
     print("\n" + "=" * 78)
     print("RUN SUMMARY")
     print("=" * 78)
@@ -476,6 +580,34 @@ def print_run_summary(targets, starting_achieved, best_achieved, edges,
     print("-" * len(bheader))
     n_candidates = N_BANDS * (2 if noise_active else 1)
     print(f"({n_candidates - len(active_bands)} candidate(s) not selected, held fixed at 0 dB)")
+
+    if attack_info is not None:
+        xfade_info = attack_info["xfade_info"]
+        fs_local = attack_info["fs"]
+        attack_gains_db = attack_info["attack_gains_db"]
+
+        print("\n-- attack refinement (hardness is active) --")
+        if xfade_info["decay_detected"] and not xfade_info["used_fallback"]:
+            print(f"decay stage detected: peak -> stabilised over "
+                  f"{xfade_info['xfade_duration_samples'] / fs_local * 1000:.1f} ms -- "
+                  f"crossfade rides the sound's own decay")
+        else:
+            reason = "no decay stage found" if not xfade_info["decay_detected"] else "detected decay was shorter than the minimum usable crossfade"
+            print(f"{reason} -- fell back to config defaults "
+                  f"(offset={ATTACK_CENTROID_WINDOW_MS:.0f}ms after attack start, "
+                  f"duration={DEFAULT_XFADE_DURATION_MS:.0f}ms)")
+        print(f"attack start: {xfade_info['attack_start_idx'] / fs_local * 1000:.1f} ms   "
+              f"peak: {xfade_info['peak_idx'] / fs_local * 1000:.1f} ms   "
+              f"crossfade: {xfade_info['xfade_start_idx'] / fs_local * 1000:.1f} ms "
+              f"-> {(xfade_info['xfade_start_idx'] + xfade_info['xfade_duration_samples']) / fs_local * 1000:.1f} ms")
+
+        print(f"\n{'channel':<9}{'band':<6}{'freq (Hz)':<18}{'attack gain (dB)':<18}{'pass-1 gain (dB)':<18}")
+        print("-" * 69)
+        for idx in active_bands:
+            idx = int(idx)
+            channel, band = candidate_channel_band(idx, noise_active)
+            freq = f"{edges[band]:.0f}-{edges[band + 1]:.0f}"
+            print(f"{channel:<9}{band:<6}{freq:<18}{attack_gains_db[idx]:<18.2f}{best_gains_db[idx]:<18.2f}")
 
 
 def run_scan(tonal_audio: np.ndarray, fs: int, noise_audio: np.ndarray = None):
@@ -580,13 +712,33 @@ def main():
 
     print(f"\nconverged: {result.success}  ({result.message})")
 
+    # Hardness is the only one of the 7 parameters whose formula is
+    # attack-window-specific (see attack_shaping.py's module docstring),
+    # so it's the only reason a second, attack-scoped search pass is ever
+    # worth running -- skipped entirely (zero extra cost) otherwise.
+    hardness_target = targets["hardness"]
+    attack_info = None
+    final_edited, final_achieved = best_edited, best_achieved
+
+    if is_active(hardness_target.target_min, hardness_target.target_max, hardness_target.priority):
+        print(f"\n--- refining attack (hardness target is active) ---")
+        (attack_gains_db, attack_edited, attack_error, attack_achieved,
+         attack_result, xfade_info) = refine_attack(
+            tonal_audio, fs, targets, active_bands, best_gains, noise_audio=noise_audio,
+        )
+        print(f"\nattack refinement converged: {attack_result.success}  ({attack_result.message})")
+        print(f"total error before attack refinement: {best_error:.5f}  ->  after: {attack_error:.5f}")
+
+        final_edited, final_achieved = attack_edited, attack_achieved
+        attack_info = {"xfade_info": xfade_info, "attack_gains_db": attack_gains_db, "fs": fs}
+
     print_run_summary(
-        targets, starting_achieved, best_achieved, edges,
+        targets, starting_achieved, final_achieved, edges,
         active_bands, relevance, best_gains, escalated_band_ids,
-        noise_active=noise_active,
+        noise_active=noise_active, attack_info=attack_info,
     )
 
-    sf.write(OUTPUT_AUDIO_PATH, best_edited, fs)
+    sf.write(OUTPUT_AUDIO_PATH, final_edited, fs)
     print(f"\nedited audio written to: {OUTPUT_AUDIO_PATH}")
 
 
