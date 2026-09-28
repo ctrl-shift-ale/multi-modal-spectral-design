@@ -55,6 +55,7 @@ from timbral_target import (
 from spectral_optimizer import N_BANDS, band_edges, mix_channels, build_initial_simplex
 from sensitivity_analysis import PERTURBATION_DB, measure_sensitivity
 from attack_shaping import detect_attack_and_decay, crossfade_edit
+from loudness_match import measure_integrated_loudness, match_loudness
 from config import (
     MODE, OUTPUT_AUDIO_PATH, NOISE_AUDIO_PATH,
     RELEVANCE_RATIO_THRESHOLD, MIN_ACTIVE_BANDS, MAX_ACTIVE_BANDS,
@@ -64,6 +65,7 @@ from config import (
     NELDER_MEAD_STEP_DB,
     MAX_ITER, FATOL, XATOL,
     ATTACK_CENTROID_WINDOW_MS, DEFAULT_XFADE_DURATION_MS,
+    MATCH_SOURCE_LOUDNESS, LOUDNESS_MATCH_PEAK_CEILING_DBFS,
 )
 
 
@@ -518,7 +520,7 @@ def refine_attack(tonal_audio, fs, targets, active_bands: np.ndarray, pass1_gain
 
 def print_run_summary(targets, starting_achieved, best_achieved, edges,
                        active_bands, relevance, best_gains_db, escalated_band_ids,
-                       noise_active: bool = False, attack_info: dict = None):
+                       noise_active: bool = False, attack_info: dict = None, loudness_info: dict = None):
     """One consolidated block at the end of the run, instead of having to
     piece the picture together from the scattered before/after reports and
     the raw gains array: per-parameter source/target/achieved/error, and
@@ -534,7 +536,13 @@ def print_run_summary(targets, starting_achieved, best_achieved, edges,
     window, and the attack-only gains used inside it -- reported
     separately from the whole-signal gains above rather than merged into
     that table, since the two apply to different STRETCHES of the audio,
-    not the same one measured two ways."""
+    not the same one measured two ways.
+
+    loudness_info (only when MATCH_SOURCE_LOUDNESS is on -- see
+    loudness_match.match_loudness() / main()) adds a final block reporting
+    the source/edited/final LUFS-I and the gain that was applied, plus a
+    clear flag whenever the peak ceiling limited how far that gain could
+    go."""
     print("\n" + "=" * 78)
     print("RUN SUMMARY")
     print("=" * 78)
@@ -608,6 +616,21 @@ def print_run_summary(targets, starting_achieved, best_achieved, edges,
             channel, band = candidate_channel_band(idx, noise_active)
             freq = f"{edges[band]:.0f}-{edges[band + 1]:.0f}"
             print(f"{channel:<9}{band:<6}{freq:<18}{attack_gains_db[idx]:<18.2f}{best_gains_db[idx]:<18.2f}")
+
+    if loudness_info is not None:
+        print("\n-- loudness matching (final broadband gain, applied last) --")
+        if loudness_info["skipped"]:
+            print("skipped -- source and/or edited signal too quiet to measure "
+                  f"a meaningful loudness (<= {loudness_info.get('gate', -70.0):.0f} LUFS); audio left unchanged")
+        else:
+            print(f"source (unedited) loudness:  {loudness_info['source_loudness']:.2f} LUFS-I")
+            print(f"edited, pre-match loudness:  {loudness_info['edited_loudness']:.2f} LUFS-I")
+            print(f"applied gain:                {loudness_info['applied_gain_db']:+.2f} dB")
+            print(f"final (written) loudness:    {loudness_info['final_loudness']:.2f} LUFS-I")
+            if loudness_info["peak_limited"]:
+                shortfall = loudness_info["source_loudness"] - loudness_info["final_loudness"]
+                print(f"NOTE: gain was limited by the {LOUDNESS_MATCH_PEAK_CEILING_DBFS:.1f} dBFS peak ceiling -- "
+                      f"landed {shortfall:.2f} LU short of an exact match rather than risk clipping")
 
 
 def run_scan(tonal_audio: np.ndarray, fs: int, noise_audio: np.ndarray = None):
@@ -732,10 +755,30 @@ def main():
         final_edited, final_achieved = attack_edited, attack_achieved
         attack_info = {"xfade_info": xfade_info, "attack_gains_db": attack_gains_db, "fs": fs}
 
+    # Last step, after everything above: match the delivered file's
+    # overall loudness to the ORIGINAL source's (starting_audio -- the
+    # unedited tonal+noise mix already measured for starting_achieved).
+    # None of the 7 timbral targets are about overall level, so nothing
+    # upstream of this corrects for the level shift a spectral edit
+    # causes as a side effect -- see loudness_match.py's module docstring.
+    loudness_info = None
+    if MATCH_SOURCE_LOUDNESS:
+        source_loudness = measure_integrated_loudness(starting_audio, fs)
+        loudness_result = match_loudness(final_edited, fs, source_loudness)
+        final_edited = loudness_result["matched_audio"]
+        loudness_info = loudness_result
+        if not loudness_result["skipped"]:
+            # The gain can nudge the 7 timbral readings (some of the real
+            # models have some absolute-level sensitivity), so the report
+            # below should reflect what's actually being written, not the
+            # pre-gain values -- one more full analyse() call, off the hot
+            # loop, same convention as run_priority_optimizer/refine_attack.
+            final_achieved = analyse(final_edited, fs)
+
     print_run_summary(
         targets, starting_achieved, final_achieved, edges,
         active_bands, relevance, best_gains, escalated_band_ids,
-        noise_active=noise_active, attack_info=attack_info,
+        noise_active=noise_active, attack_info=attack_info, loudness_info=loudness_info,
     )
 
     sf.write(OUTPUT_AUDIO_PATH, final_edited, fs)

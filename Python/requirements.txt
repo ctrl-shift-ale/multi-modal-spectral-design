@@ -1,0 +1,12 @@
+# Core pipeline (priority_optimizer.py / main.py) -- everything config.py,
+# spectral_optimizer.py, timbral_target.py, sensitivity_analysis.py,
+# attack_shaping.py, and loudness_match.py need:
+numpy
+scipy
+soundfile
+timbral_models
+pyloudnorm
+
+# Optional -- only needed for osc_interface_Max.py (the Max/MSP OSC bridge),
+# not for running priority_optimizer.py/main.py on its own:
+python-osc

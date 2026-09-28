@@ -353,3 +353,30 @@ DECAY_STABILIZATION_HOLD_MS = 50.0
 # above -- covers a source with no real decay stage at all (a hard onset
 # straight into a flat sustain, or a one-shot that just keeps ringing).
 DECAY_SEARCH_MAX_MS = 500.0
+
+
+# ============================================================
+# Final loudness matching (loudness_match.py, priority_optimizer.py)
+# ============================================================
+
+# Every one of the 7 timbral targets above describes the SHAPE of the
+# spectrum -- none of them are about overall level, and a spectral edit
+# shifts overall level as a side effect even when that was never the
+# intent (boosting/cutting bands changes total signal energy). This final
+# step is deliberately separate from that search: after everything else
+# is done (including attack refinement, when it ran), it measures the
+# ORIGINAL source's (tonal + noise, unedited) integrated loudness
+# (LUFS-I, ITU-R BS.1770, via the pyloudnorm package -- `pip install
+# pyloudnorm`) and applies a single broadband gain to the edited result
+# so the delivered file matches it: the edit should read as a reshaping
+# of the source, not a louder or quieter version of it.
+MATCH_SOURCE_LOUDNESS = True
+
+# Safety ceiling, in dBFS (a sample-peak check, not a true-peak/ISP
+# measurement): the loudness-matching gain above is never allowed to push
+# the edited signal's peak past this, even if that means landing short of
+# the source's exact loudness. A clipped delivery file is a worse outcome
+# than a loudness mismatch of a fraction of a dB, so when this ceiling
+# limits the gain it's reported (see print_run_summary's "loudness
+# matching" block), never silently swallowed.
+LOUDNESS_MATCH_PEAK_CEILING_DBFS = -1.0
