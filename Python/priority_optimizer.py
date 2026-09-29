@@ -38,10 +38,6 @@ import soundfile as sf
 from scipy.optimize import minimize
 
 from timbral_target import (
-    TONAL_AUDIO_PATH,
-    TARGETS,
-    PRIORITIES,
-    TARGET_MODE,
     load_tonal,
     load_noise,
     build_targets,
@@ -52,21 +48,17 @@ from timbral_target import (
     PARAM_NAMES,
     _fmt_num,
 )
-from spectral_optimizer import N_BANDS, band_edges, mix_channels, build_initial_simplex
-from sensitivity_analysis import PERTURBATION_DB, measure_sensitivity
+from spectral_optimizer import band_edges, mix_channels, build_initial_simplex
+from sensitivity_analysis import measure_sensitivity
 from attack_shaping import detect_attack_and_decay, crossfade_edit
 from loudness_match import measure_integrated_loudness, match_loudness
-from config import (
-    MODE, OUTPUT_AUDIO_PATH, NOISE_AUDIO_PATH,
-    RELEVANCE_RATIO_THRESHOLD, MIN_ACTIVE_BANDS, MAX_ACTIVE_BANDS,
-    WARMSTART_BANDS, WARMSTART_MAX_ITER,
-    IDEAL_GAIN_MIN_DB, IDEAL_GAIN_MAX_DB,
-    LIMITER_GAIN_MIN_DB, LIMITER_GAIN_MAX_DB, PINNED_EPSILON_DB,
-    NELDER_MEAD_STEP_DB,
-    MAX_ITER, FATOL, XATOL,
-    ATTACK_CENTROID_WINDOW_MS, DEFAULT_XFADE_DURATION_MS,
-    MATCH_SOURCE_LOUDNESS, LOUDNESS_MATCH_PEAK_CEILING_DBFS,
-)
+import config
+
+# config.py's values are read live via `config.X` at the point of use,
+# never cached into a module-level name here -- see spectral_optimizer.py's
+# equivalent note for why (the short version: OSC can rewrite config.py's
+# attributes on the fly between runs -- see osc_interface_Max.py -- and a
+# name bound once at import time would silently stop tracking that).
 
 
 # ============================================================
@@ -153,7 +145,7 @@ def select_bands(relevance: np.ndarray, ratio_threshold: float, min_bands: int, 
     if noise_active:
         paired = set(int(i) for i in kept)
         for idx in list(paired):
-            sibling = idx + N_BANDS if idx < N_BANDS else idx - N_BANDS
+            sibling = idx + config.N_BANDS if idx < config.N_BANDS else idx - config.N_BANDS
             if relevance[sibling] > 1e-9 and sibling not in paired:
                 paired.add(sibling)
         kept = np.array(sorted(paired))
@@ -169,8 +161,8 @@ def candidate_channel_band(idx: int, noise_active: bool) -> tuple:
     depends only on fs and N_BANDS, not on which channel), so a band
     index means the same frequency range in either channel."""
     idx = int(idx)
-    if noise_active and idx >= N_BANDS:
-        return "noise", idx - N_BANDS
+    if noise_active and idx >= config.N_BANDS:
+        return "noise", idx - config.N_BANDS
     return "tonal", idx
 
 
@@ -229,7 +221,7 @@ def sensitivity_x0(active_bands: np.ndarray, sensitivity_matrix: np.ndarray, tar
         t = targets[best_name]
         target_mid = (t.target_min + t.target_max) / 2.0
         gain_guess = (target_mid - baseline) / best_slope
-        x0[i] = np.clip(gain_guess, IDEAL_GAIN_MIN_DB, IDEAL_GAIN_MAX_DB)
+        x0[i] = np.clip(gain_guess, config.IDEAL_GAIN_MIN_DB, config.IDEAL_GAIN_MAX_DB)
 
     return x0
 
@@ -259,7 +251,7 @@ def warmstart_x0(tonal_audio, fs, targets, active_bands: np.ndarray, relevance: 
     warm_band_ids = active_bands[top_within_active]
 
     objective = make_restricted_objective(tonal_audio, fs, targets, warm_band_ids, noise_audio=noise_audio)
-    warm_bounds = [(IDEAL_GAIN_MIN_DB, IDEAL_GAIN_MAX_DB)] * n
+    warm_bounds = [(config.IDEAL_GAIN_MIN_DB, config.IDEAL_GAIN_MAX_DB)] * n
     x0_sub = x0[top_within_active]
     result = minimize(
         objective,
@@ -267,8 +259,8 @@ def warmstart_x0(tonal_audio, fs, targets, active_bands: np.ndarray, relevance: 
         method="Nelder-Mead",
         bounds=warm_bounds,
         options={
-            "maxiter": warmstart_max_iter, "fatol": FATOL, "xatol": XATOL,
-            "initial_simplex": build_initial_simplex(x0_sub, NELDER_MEAD_STEP_DB, warm_bounds),
+            "maxiter": warmstart_max_iter, "fatol": config.FATOL, "xatol": config.XATOL,
+            "initial_simplex": build_initial_simplex(x0_sub, config.NELDER_MEAD_STEP_DB, warm_bounds),
         },
     )
 
@@ -296,7 +288,7 @@ def make_restricted_objective(tonal_audio, fs, targets, active_bands: np.ndarray
     the same point twice."""
     cache = {}
     priorities_map = {name: t.priority for name, t in targets.items()}
-    n_candidates = N_BANDS * (2 if noise_audio is not None else 1)
+    n_candidates = config.N_BANDS * (2 if noise_audio is not None else 1)
 
     def objective(sub_gains_db: np.ndarray) -> float:
         key = tuple(np.round(sub_gains_db, 6))
@@ -306,8 +298,8 @@ def make_restricted_objective(tonal_audio, fs, targets, active_bands: np.ndarray
         full_gains_db = np.zeros(n_candidates)
         full_gains_db[active_bands] = sub_gains_db
 
-        tonal_gains_db = full_gains_db[:N_BANDS]
-        noise_gains_db = full_gains_db[N_BANDS:] if noise_audio is not None else None
+        tonal_gains_db = full_gains_db[:config.N_BANDS]
+        noise_gains_db = full_gains_db[config.N_BANDS:] if noise_audio is not None else None
 
         mixed = mix_channels(tonal_audio, fs, tonal_gains_db, noise_audio, noise_gains_db)
         achieved = analyse(mixed, fs, priorities=priorities_map)
@@ -341,8 +333,8 @@ def run_search_pass(objective, x0_pass: np.ndarray, bounds_pass: list, label: st
         bounds=bounds_pass,
         callback=callback,
         options={
-            "maxiter": MAX_ITER, "fatol": FATOL, "xatol": XATOL,
-            "initial_simplex": build_initial_simplex(x0_pass, NELDER_MEAD_STEP_DB, bounds_pass),
+            "maxiter": config.MAX_ITER, "fatol": config.FATOL, "xatol": config.XATOL,
+            "initial_simplex": build_initial_simplex(x0_pass, config.NELDER_MEAD_STEP_DB, bounds_pass),
         },
     )
 
@@ -373,7 +365,7 @@ def run_priority_optimizer(tonal_audio, fs, targets, active_bands: np.ndarray, r
     step here, so tonal and noise are always evaluated in the combined
     signal the timbral models actually hear."""
     noise_active = noise_audio is not None
-    n_candidates = N_BANDS * (2 if noise_active else 1)
+    n_candidates = config.N_BANDS * (2 if noise_active else 1)
     objective = make_restricted_objective(tonal_audio, fs, targets, active_bands, noise_audio=noise_audio)
 
     k = len(active_bands)
@@ -381,19 +373,20 @@ def run_priority_optimizer(tonal_audio, fs, targets, active_bands: np.ndarray, r
     x0 = sensitivity_x0(active_bands, sensitivity_matrix, targets, starting_achieved)
     print(f"  first-order guess from existing sensitivity data: {np.round(x0, 2)} dB (0 extra evaluations)")
 
-    if WARMSTART_BANDS > 0:
-        print(f"  refining with a {min(WARMSTART_BANDS, k)}-band pre-solve, seeded from that guess...")
+    if config.WARMSTART_BANDS > 0:
+        print(f"  refining with a {min(config.WARMSTART_BANDS, k)}-band pre-solve, seeded from that guess...")
         x0 = warmstart_x0(
             tonal_audio, fs, targets, active_bands, relevance,
-            WARMSTART_BANDS, WARMSTART_MAX_ITER, x0_seed=x0, noise_audio=noise_audio,
+            config.WARMSTART_BANDS, config.WARMSTART_MAX_ITER, x0_seed=x0, noise_audio=noise_audio,
         )
 
-    ideal_bounds = [(IDEAL_GAIN_MIN_DB, IDEAL_GAIN_MAX_DB)] * k
+    ideal_bounds = [(config.IDEAL_GAIN_MIN_DB, config.IDEAL_GAIN_MAX_DB)] * k
 
     result = run_search_pass(objective, x0, ideal_bounds)
 
     pinned = np.array([
-        (abs(g - IDEAL_GAIN_MIN_DB) <= PINNED_EPSILON_DB) or (abs(g - IDEAL_GAIN_MAX_DB) <= PINNED_EPSILON_DB)
+        (abs(g - config.IDEAL_GAIN_MIN_DB) <= config.PINNED_EPSILON_DB)
+        or (abs(g - config.IDEAL_GAIN_MAX_DB) <= config.PINNED_EPSILON_DB)
         for g in result.x
     ])
 
@@ -406,7 +399,7 @@ def run_priority_optimizer(tonal_audio, fs, targets, active_bands: np.ndarray, r
             f"for: {', '.join(pinned_labels)}\n"
         )
         escalated_bounds = [
-            (LIMITER_GAIN_MIN_DB, LIMITER_GAIN_MAX_DB) if pinned[i] else ideal_bounds[i]
+            (config.LIMITER_GAIN_MIN_DB, config.LIMITER_GAIN_MAX_DB) if pinned[i] else ideal_bounds[i]
             for i in range(k)
         ]
         escalated_band_ids = {int(active_bands[i]) for i in range(k) if pinned[i]}
@@ -421,8 +414,8 @@ def run_priority_optimizer(tonal_audio, fs, targets, active_bands: np.ndarray, r
     # rather than having to know the flat layout themselves.
     best_full_gains_db = np.zeros(n_candidates)
     best_full_gains_db[active_bands] = result.x
-    tonal_gains_db = best_full_gains_db[:N_BANDS]
-    noise_gains_db = best_full_gains_db[N_BANDS:] if noise_active else None
+    tonal_gains_db = best_full_gains_db[:config.N_BANDS]
+    noise_gains_db = best_full_gains_db[config.N_BANDS:] if noise_active else None
 
     best_edited = mix_channels(tonal_audio, fs, tonal_gains_db, noise_audio, noise_gains_db)
     best_achieved = analyse(best_edited, fs)
@@ -465,24 +458,24 @@ def refine_attack(tonal_audio, fs, targets, active_bands: np.ndarray, pass1_gain
     result, xfade_info) -- xfade_info is detect_attack_and_decay()'s own
     dict, useful for the run summary."""
     noise_active = noise_audio is not None
-    n_candidates = N_BANDS * (2 if noise_active else 1)
+    n_candidates = config.N_BANDS * (2 if noise_active else 1)
 
     baseline_audio = mix_channels(
-        tonal_audio, fs, np.zeros(N_BANDS),
-        noise_audio, np.zeros(N_BANDS) if noise_active else None,
+        tonal_audio, fs, np.zeros(config.N_BANDS),
+        noise_audio, np.zeros(config.N_BANDS) if noise_active else None,
     )
     xfade_info = detect_attack_and_decay(baseline_audio, fs)
 
-    tonal_pass1_db = pass1_gains_db[:N_BANDS]
-    noise_pass1_db = pass1_gains_db[N_BANDS:] if noise_active else None
+    tonal_pass1_db = pass1_gains_db[:config.N_BANDS]
+    noise_pass1_db = pass1_gains_db[config.N_BANDS:] if noise_active else None
 
     priorities_map = {name: t.priority for name, t in targets.items()}
 
     def build_composite(sub_gains_db: np.ndarray) -> np.ndarray:
         full_gains_db = np.zeros(n_candidates)
         full_gains_db[active_bands] = sub_gains_db
-        tonal_attack_db = full_gains_db[:N_BANDS]
-        noise_attack_db = full_gains_db[N_BANDS:] if noise_active else None
+        tonal_attack_db = full_gains_db[:config.N_BANDS]
+        noise_attack_db = full_gains_db[config.N_BANDS:] if noise_active else None
         return crossfade_edit(
             tonal_audio, fs, tonal_attack_db, tonal_pass1_db,
             noise_audio, noise_attack_db, noise_pass1_db,
@@ -505,7 +498,7 @@ def refine_attack(tonal_audio, fs, targets, active_bands: np.ndarray, pass1_gain
     # a reasonable edit for the attack too, this pass only needs to find
     # how much further to push it there specifically.
     x0 = pass1_gains_db[active_bands]
-    bounds = [(IDEAL_GAIN_MIN_DB, IDEAL_GAIN_MAX_DB)] * len(active_bands)
+    bounds = [(config.IDEAL_GAIN_MIN_DB, config.IDEAL_GAIN_MAX_DB)] * len(active_bands)
     result = run_search_pass(objective, x0, bounds, label="attack")
 
     best_full_gains_db = np.zeros(n_candidates)
@@ -518,31 +511,168 @@ def refine_attack(tonal_audio, fs, targets, active_bands: np.ndarray, pass1_gain
     return best_full_gains_db, final_edited, final_error, final_achieved, result, xfade_info
 
 
-def print_run_summary(targets, starting_achieved, best_achieved, edges,
-                       active_bands, relevance, best_gains_db, escalated_band_ids,
-                       noise_active: bool = False, attack_info: dict = None, loudness_info: dict = None):
-    """One consolidated block at the end of the run, instead of having to
-    piece the picture together from the scattered before/after reports and
-    the raw gains array: per-parameter source/target/achieved/error, and
-    per-candidate (channel + frequency range)/relevance/final gain for
-    every candidate the search was actually allowed to touch. Two tables,
-    not one -- there are 7 parameters and a different number of active
-    candidates, so cramming both into one row-aligned table would
-    misrepresent the data, not simplify it.
+def build_run_report(targets, starting_achieved, best_achieved, edges,
+                      active_bands, relevance, best_gains_db, escalated_band_ids,
+                      noise_active: bool = False, converged: bool = None, convergence_message: str = None,
+                      attack_info: dict = None, loudness_info: dict = None, output_audio_path=None) -> dict:
+    """Everything a finished "edit" run needs to report -- to the console
+    (via print_report() below) AND, unchanged, to Max over OSC as the
+    final message before the server goes back to listening (see
+    osc_interface_Max.py) -- assembled ONCE into a single plain,
+    JSON-serialisable dict (only str/int/float/bool/None/list/dict), so
+    there is exactly one source of truth for "what happened in this run"
+    rather than the console text and the OSC report drifting apart.
 
-    attack_info (only when hardness was active -- see refine_attack() /
-    main()) adds a third block reporting where the attack/decay was
-    detected (or that it fell back to config defaults), the crossfade
-    window, and the attack-only gains used inside it -- reported
-    separately from the whole-signal gains above rather than merged into
-    that table, since the two apply to different STRETCHES of the audio,
-    not the same one measured two ways.
+    Shape:
+      mode: "edit"
+      converged, convergence_message: from the (last) Nelder-Mead result
+      total_error: float
+      parameters: [{name, source, target_min, target_max, achieved, hit,
+                     priority, weighted_error}, ...] -- one per PARAM_NAMES,
+                    in that order; achieved/hit are None for a priority<=0
+                    parameter analyse() skipped computing.
+      active_bands: [{candidate_index, channel, band, freq_min, freq_max,
+                       relevance, final_gain_db, range_used}, ...] -- one
+                     per candidate the search was allowed to touch.
+      bands_not_selected: int -- candidates held fixed at 0 dB.
+      attack_refinement: None, or {decay_detected, used_fallback,
+                    attack_start_ms, peak_ms, xfade_start_ms, xfade_end_ms,
+                    bands: [{channel, band, freq_min, freq_max,
+                              attack_gain_db, pass1_gain_db}, ...]}
+                  -- only present when hardness was an active target (see
+                  refine_attack() / main()).
+      loudness_match: None, or {skipped, gate_lufs} when skipped, else
+                    {skipped: False, source_loudness_lufs,
+                     edited_loudness_lufs, applied_gain_db,
+                     final_loudness_lufs, peak_limited,
+                     peak_ceiling_dbfs (only when peak_limited)} -- only
+                  present when MATCH_SOURCE_LOUDNESS was on.
+      output_audio_path: str or None."""
+    parameters = []
+    for name in PARAM_NAMES:
+        t = targets[name]
+        src = starting_achieved.get(name)
+        val = best_achieved.get(name)
+        hit = None
+        if val is not None:
+            hit = (t.target_min <= val <= t.target_max) if t.priority > 0 else None
+        parameters.append({
+            "name": name,
+            "source": src,
+            "target_min": t.target_min,
+            "target_max": t.target_max,
+            "achieved": val,
+            "hit": hit,
+            "priority": t.priority,
+            "weighted_error": t.weighted_error(val) if val is not None else 0.0,
+        })
 
-    loudness_info (only when MATCH_SOURCE_LOUDNESS is on -- see
-    loudness_match.match_loudness() / main()) adds a final block reporting
-    the source/edited/final LUFS-I and the gain that was applied, plus a
-    clear flag whenever the peak ceiling limited how far that gain could
-    go."""
+    active_band_reports = []
+    for idx in active_bands:
+        idx = int(idx)
+        channel, band = candidate_channel_band(idx, noise_active)
+        active_band_reports.append({
+            "candidate_index": idx,
+            "channel": channel,
+            "band": band,
+            "freq_min": float(edges[band]),
+            "freq_max": float(edges[band + 1]),
+            "relevance": float(relevance[idx]),
+            "final_gain_db": float(best_gains_db[idx]),
+            "range_used": "limiter" if idx in escalated_band_ids else "ideal",
+        })
+
+    n_candidates = config.N_BANDS * (2 if noise_active else 1)
+
+    attack_refinement = None
+    if attack_info is not None:
+        xfade_info = attack_info["xfade_info"]
+        fs_local = attack_info["fs"]
+        attack_gains_db = attack_info["attack_gains_db"]
+        attack_refinement = {
+            "decay_detected": bool(xfade_info["decay_detected"]),
+            "used_fallback": bool(xfade_info["used_fallback"]),
+            "attack_start_ms": xfade_info["attack_start_idx"] / fs_local * 1000,
+            "peak_ms": xfade_info["peak_idx"] / fs_local * 1000,
+            "xfade_start_ms": xfade_info["xfade_start_idx"] / fs_local * 1000,
+            "xfade_end_ms": (xfade_info["xfade_start_idx"] + xfade_info["xfade_duration_samples"]) / fs_local * 1000,
+            "bands": [],
+        }
+        for idx in active_bands:
+            idx = int(idx)
+            channel, band = candidate_channel_band(idx, noise_active)
+            attack_refinement["bands"].append({
+                "channel": channel,
+                "band": band,
+                "freq_min": float(edges[band]),
+                "freq_max": float(edges[band + 1]),
+                "attack_gain_db": float(attack_gains_db[idx]),
+                "pass1_gain_db": float(best_gains_db[idx]),
+            })
+
+    loudness_match = None
+    if loudness_info is not None:
+        if loudness_info["skipped"]:
+            loudness_match = {"skipped": True, "gate_lufs": loudness_info.get("gate", -70.0)}
+        else:
+            loudness_match = {
+                "skipped": False,
+                "source_loudness_lufs": loudness_info["source_loudness"],
+                "edited_loudness_lufs": loudness_info["edited_loudness"],
+                "applied_gain_db": loudness_info["applied_gain_db"],
+                "final_loudness_lufs": loudness_info["final_loudness"],
+                "peak_limited": bool(loudness_info["peak_limited"]),
+            }
+            if loudness_info["peak_limited"]:
+                loudness_match["peak_ceiling_dbfs"] = config.LOUDNESS_MATCH_PEAK_CEILING_DBFS
+
+    return {
+        "mode": "edit",
+        "converged": converged,
+        "convergence_message": convergence_message,
+        "total_error": total_error(targets, best_achieved),
+        "parameters": parameters,
+        "active_bands": active_band_reports,
+        "bands_not_selected": n_candidates - len(active_bands),
+        "attack_refinement": attack_refinement,
+        "loudness_match": loudness_match,
+        "output_audio_path": str(output_audio_path) if output_audio_path is not None else None,
+    }
+
+
+def build_scan_report(achieved: dict, fs: int, noise_active: bool) -> dict:
+    """Same idea as build_run_report(), for MODE="scan" -- just the 7
+    raw timbral readings plus the sources/sample rate that were analysed,
+    no targets/search/output file to report since scan mode has none."""
+    return {
+        "mode": "scan",
+        "tonal_source": str(config.TONAL_AUDIO_PATH),
+        "noise_source": str(config.NOISE_AUDIO_PATH) if noise_active else None,
+        "sample_rate_hz": fs,
+        "parameters": [{"name": name, "value": achieved[name]} for name in PARAM_NAMES],
+    }
+
+
+def print_report(report: dict) -> None:
+    """Prints build_run_report()'s or build_scan_report()'s dict to the
+    console -- the exact same information the OSC final report carries
+    (see osc_interface_Max.py), just formatted for a human reading the
+    terminal instead of a Max patch parsing OSC. Pure formatter: takes no
+    argument this dict doesn't already carry, so console output and the
+    OSC report can never drift apart from each other."""
+    if report["mode"] == "scan":
+        print("--- scan mode: analysis only (no targets, no search, no output file) ---\n")
+        print(f"tonal source: {report['tonal_source']}")
+        print(f"noise source: {report['noise_source'] or '(none -- tonal-only)'}")
+        print(f"sample rate:  {report['sample_rate_hz']} Hz\n")
+
+        header = f"{'parameter':<12}{'value':<10}"
+        print(header)
+        print("-" * len(header))
+        for p in report["parameters"]:
+            print(f"{p['name']:<12}{p['value']:<10.2f}")
+        return
+
     print("\n" + "=" * 78)
     print("RUN SUMMARY")
     print("=" * 78)
@@ -551,132 +681,118 @@ def print_run_summary(targets, starting_achieved, best_achieved, edges,
     header = f"{'parameter':<12}{'source':<10}{'target':<16}{'achieved':<10}{'hit?':<6}{'priority':<10}{'weighted err':<14}"
     print(header)
     print("-" * len(header))
-    for name in PARAM_NAMES:
-        t = targets[name]
-        src = starting_achieved.get(name)
-        val = best_achieved.get(name)
-        band = f"{_fmt_num(t.target_min)}-{_fmt_num(t.target_max)}"
-        src_str = f"{src:.2f}" if src is not None else "--"
-        if val is None:
-            print(f"{name:<12}{src_str:<10}{band:<16}{'--':<10}{'N/A':<6}{t.priority:<10.1f}{'0.00000':<14}")
+    for p in report["parameters"]:
+        band = f"{_fmt_num(p['target_min'])}-{_fmt_num(p['target_max'])}"
+        src_str = f"{p['source']:.2f}" if p["source"] is not None else "--"
+        if p["achieved"] is None:
+            print(f"{p['name']:<12}{src_str:<10}{band:<16}{'--':<10}{'N/A':<6}{p['priority']:<10.1f}{'0.00000':<14}")
             continue
-        # priority 0 -- hit/miss is meaningless (never affects total_error
-        # regardless of where it lands), so N/A rather than a misleading
-        # yes/no.
-        if t.priority <= 0:
-            hit_str = "N/A"
-        else:
-            hit_str = "yes" if t.target_min <= val <= t.target_max else "no"
-        werr = t.weighted_error(val)
+        hit_str = "N/A" if p["hit"] is None else ("yes" if p["hit"] else "no")
         print(
-            f"{name:<12}{src_str:<10}{band:<16}{val:<10.2f}{hit_str:<6}"
-            f"{t.priority:<10.1f}{werr:<14.5f}"
+            f"{p['name']:<12}{src_str:<10}{band:<16}{p['achieved']:<10.2f}{hit_str:<6}"
+            f"{p['priority']:<10.1f}{p['weighted_error']:<14.5f}"
         )
     print("-" * len(header))
-    print(f"TOTAL ERROR: {total_error(targets, best_achieved):.5f}")
+    print(f"TOTAL ERROR: {report['total_error']:.5f}")
 
     print("\n-- active bands --")
     bheader = f"{'channel':<9}{'band':<6}{'freq (Hz)':<18}{'relevance':<12}{'final gain (dB)':<18}{'range used':<12}"
     print(bheader)
     print("-" * len(bheader))
-    for idx in active_bands:
-        idx = int(idx)
-        channel, band = candidate_channel_band(idx, noise_active)
-        freq = f"{edges[band]:.0f}-{edges[band + 1]:.0f}"
-        rng = "limiter" if idx in escalated_band_ids else "ideal"
-        print(f"{channel:<9}{band:<6}{freq:<18}{relevance[idx]:<12.3f}{best_gains_db[idx]:<18.2f}{rng:<12}")
+    for b in report["active_bands"]:
+        freq = f"{b['freq_min']:.0f}-{b['freq_max']:.0f}"
+        print(f"{b['channel']:<9}{b['band']:<6}{freq:<18}{b['relevance']:<12.3f}{b['final_gain_db']:<18.2f}{b['range_used']:<12}")
     print("-" * len(bheader))
-    n_candidates = N_BANDS * (2 if noise_active else 1)
-    print(f"({n_candidates - len(active_bands)} candidate(s) not selected, held fixed at 0 dB)")
+    print(f"({report['bands_not_selected']} candidate(s) not selected, held fixed at 0 dB)")
 
-    if attack_info is not None:
-        xfade_info = attack_info["xfade_info"]
-        fs_local = attack_info["fs"]
-        attack_gains_db = attack_info["attack_gains_db"]
-
+    attack_refinement = report["attack_refinement"]
+    if attack_refinement is not None:
         print("\n-- attack refinement (hardness is active) --")
-        if xfade_info["decay_detected"] and not xfade_info["used_fallback"]:
+        if attack_refinement["decay_detected"] and not attack_refinement["used_fallback"]:
             print(f"decay stage detected: peak -> stabilised over "
-                  f"{xfade_info['xfade_duration_samples'] / fs_local * 1000:.1f} ms -- "
+                  f"{attack_refinement['xfade_end_ms'] - attack_refinement['xfade_start_ms']:.1f} ms -- "
                   f"crossfade rides the sound's own decay")
         else:
-            reason = "no decay stage found" if not xfade_info["decay_detected"] else "detected decay was shorter than the minimum usable crossfade"
+            reason = ("no decay stage found" if not attack_refinement["decay_detected"]
+                       else "detected decay was shorter than the minimum usable crossfade")
             print(f"{reason} -- fell back to config defaults "
-                  f"(offset={ATTACK_CENTROID_WINDOW_MS:.0f}ms after attack start, "
-                  f"duration={DEFAULT_XFADE_DURATION_MS:.0f}ms)")
-        print(f"attack start: {xfade_info['attack_start_idx'] / fs_local * 1000:.1f} ms   "
-              f"peak: {xfade_info['peak_idx'] / fs_local * 1000:.1f} ms   "
-              f"crossfade: {xfade_info['xfade_start_idx'] / fs_local * 1000:.1f} ms "
-              f"-> {(xfade_info['xfade_start_idx'] + xfade_info['xfade_duration_samples']) / fs_local * 1000:.1f} ms")
+                  f"(offset={config.ATTACK_CENTROID_WINDOW_MS:.0f}ms after attack start, "
+                  f"duration={config.DEFAULT_XFADE_DURATION_MS:.0f}ms)")
+        print(f"attack start: {attack_refinement['attack_start_ms']:.1f} ms   "
+              f"peak: {attack_refinement['peak_ms']:.1f} ms   "
+              f"crossfade: {attack_refinement['xfade_start_ms']:.1f} ms "
+              f"-> {attack_refinement['xfade_end_ms']:.1f} ms")
 
         print(f"\n{'channel':<9}{'band':<6}{'freq (Hz)':<18}{'attack gain (dB)':<18}{'pass-1 gain (dB)':<18}")
         print("-" * 69)
-        for idx in active_bands:
-            idx = int(idx)
-            channel, band = candidate_channel_band(idx, noise_active)
-            freq = f"{edges[band]:.0f}-{edges[band + 1]:.0f}"
-            print(f"{channel:<9}{band:<6}{freq:<18}{attack_gains_db[idx]:<18.2f}{best_gains_db[idx]:<18.2f}")
+        for b in attack_refinement["bands"]:
+            freq = f"{b['freq_min']:.0f}-{b['freq_max']:.0f}"
+            print(f"{b['channel']:<9}{b['band']:<6}{freq:<18}{b['attack_gain_db']:<18.2f}{b['pass1_gain_db']:<18.2f}")
 
-    if loudness_info is not None:
+    loudness_match = report["loudness_match"]
+    if loudness_match is not None:
         print("\n-- loudness matching (final broadband gain, applied last) --")
-        if loudness_info["skipped"]:
+        if loudness_match["skipped"]:
             print("skipped -- source and/or edited signal too quiet to measure "
-                  f"a meaningful loudness (<= {loudness_info.get('gate', -70.0):.0f} LUFS); audio left unchanged")
+                  f"a meaningful loudness (<= {loudness_match['gate_lufs']:.0f} LUFS); audio left unchanged")
         else:
-            print(f"source (unedited) loudness:  {loudness_info['source_loudness']:.2f} LUFS-I")
-            print(f"edited, pre-match loudness:  {loudness_info['edited_loudness']:.2f} LUFS-I")
-            print(f"applied gain:                {loudness_info['applied_gain_db']:+.2f} dB")
-            print(f"final (written) loudness:    {loudness_info['final_loudness']:.2f} LUFS-I")
-            if loudness_info["peak_limited"]:
-                shortfall = loudness_info["source_loudness"] - loudness_info["final_loudness"]
-                print(f"NOTE: gain was limited by the {LOUDNESS_MATCH_PEAK_CEILING_DBFS:.1f} dBFS peak ceiling -- "
+            print(f"source (unedited) loudness:  {loudness_match['source_loudness_lufs']:.2f} LUFS-I")
+            print(f"edited, pre-match loudness:  {loudness_match['edited_loudness_lufs']:.2f} LUFS-I")
+            print(f"applied gain:                {loudness_match['applied_gain_db']:+.2f} dB")
+            print(f"final (written) loudness:    {loudness_match['final_loudness_lufs']:.2f} LUFS-I")
+            if loudness_match["peak_limited"]:
+                shortfall = loudness_match["source_loudness_lufs"] - loudness_match["final_loudness_lufs"]
+                print(f"NOTE: gain was limited by the {loudness_match['peak_ceiling_dbfs']:.1f} dBFS peak ceiling -- "
                       f"landed {shortfall:.2f} LU short of an exact match rather than risk clipping")
 
 
-def run_scan(tonal_audio: np.ndarray, fs: int, noise_audio: np.ndarray = None):
+def run_scan(tonal_audio: np.ndarray, fs: int, noise_audio: np.ndarray = None) -> dict:
     """MODE="scan": the analysis half of the pipeline only -- no TARGETS,
     no sensitivity probing, no search, nothing written to OUTPUT_AUDIO_PATH.
-    Just "where does this sound sit right now?", printed straight to the
-    console. Analyses the same signal edit mode would start from: tonal +
-    noise summed at 0 dB (unchanged) when a noise stem is active, tonal
-    alone otherwise -- via mix_channels(), same as main()'s baseline, so
-    a scan and the "source" row of an edit run always agree."""
+    Just "where does this sound sit right now?". Analyses the same signal
+    edit mode would start from: tonal + noise summed at 0 dB (unchanged)
+    when a noise stem is active, tonal alone otherwise -- via
+    mix_channels(), same as main()'s baseline, so a scan and the "source"
+    row of an edit run always agree.
+
+    Returns the structured report dict (see build_scan_report()) after
+    printing it -- same convention as main()'s edit-mode return, so a
+    caller (main.py, or the OSC /run handler in osc_interface_Max.py) gets
+    the same kind of value regardless of which MODE actually ran."""
     noise_active = noise_audio is not None
     audio = mix_channels(
-        tonal_audio, fs, np.zeros(N_BANDS),
-        noise_audio, np.zeros(N_BANDS) if noise_active else None,
+        tonal_audio, fs, np.zeros(config.N_BANDS),
+        noise_audio, np.zeros(config.N_BANDS) if noise_active else None,
     )
     achieved = analyse(audio, fs)
 
-    print("--- scan mode: analysis only (no targets, no search, no output file) ---\n")
-    print(f"tonal source: {TONAL_AUDIO_PATH}")
-    print(f"noise source: {NOISE_AUDIO_PATH if noise_active else '(none -- tonal-only)'}")
-    print(f"sample rate:  {fs} Hz\n")
-
-    header = f"{'parameter':<12}{'value':<10}"
-    print(header)
-    print("-" * len(header))
-    for name in PARAM_NAMES:
-        print(f"{name:<12}{achieved[name]:<10.2f}")
+    scan_report = build_scan_report(achieved, fs, noise_active)
+    print_report(scan_report)
+    return scan_report
 
 
-def main():
-    if not TONAL_AUDIO_PATH.exists():
-        raise FileNotFoundError(f"TONAL_AUDIO_PATH not found: {TONAL_AUDIO_PATH}")
+def main() -> dict:
+    """Returns the structured run report (build_run_report() for MODE="edit",
+    build_scan_report() for MODE="scan") after printing it -- this is what
+    lets a caller other than __main__ (the OSC /run handler in
+    osc_interface_Max.py, in particular) get the exact same "what happened
+    in this run" data that was printed to the console, to forward to Max
+    as the final report."""
+    if not config.TONAL_AUDIO_PATH.exists():
+        raise FileNotFoundError(f"TONAL_AUDIO_PATH not found: {config.TONAL_AUDIO_PATH}")
 
-    tonal_audio, fs = load_tonal(TONAL_AUDIO_PATH)
-    noise_audio, noise_fs = load_noise(NOISE_AUDIO_PATH)
+    tonal_audio, fs = load_tonal(config.TONAL_AUDIO_PATH)
+    noise_audio, noise_fs = load_noise(config.NOISE_AUDIO_PATH)
     if noise_audio is not None and noise_fs != fs:
         print(f"note: noise sample rate ({noise_fs} Hz) != tonal ({fs} Hz) -- ignoring noise component\n")
         noise_audio = None
 
-    if MODE == "scan":
-        run_scan(tonal_audio, fs, noise_audio)
-        return
+    if config.MODE == "scan":
+        return run_scan(tonal_audio, fs, noise_audio)
 
     noise_active = noise_audio is not None
-    n_candidates = N_BANDS * (2 if noise_active else 1)
-    edges = band_edges(fs, N_BANDS)
+    n_candidates = config.N_BANDS * (2 if noise_active else 1)
+    edges = band_edges(fs, config.N_BANDS)
 
     print("--- before optimisation ---")
     # Baseline is the UNEDITED mix (both channels at 0 dB, i.e. unchanged)
@@ -685,17 +801,17 @@ def main():
     # move away from, and it's also what "relative" TARGET_MODE resolves
     # its deltas against (see build_targets()).
     starting_audio = mix_channels(
-        tonal_audio, fs, np.zeros(N_BANDS),
-        noise_audio, np.zeros(N_BANDS) if noise_active else None,
+        tonal_audio, fs, np.zeros(config.N_BANDS),
+        noise_audio, np.zeros(config.N_BANDS) if noise_active else None,
     )
     starting_achieved = analyse(starting_audio, fs)
-    targets = build_targets(TARGETS, PRIORITIES, baseline=starting_achieved)
-    describe_target_resolution(TARGETS, TARGET_MODE, starting_achieved)
+    targets = build_targets(config.TARGETS, config.PRIORITIES, baseline=starting_achieved)
+    describe_target_resolution(config.TARGETS, config.TARGET_MODE, starting_achieved)
     print()
     report(targets, starting_achieved)
 
     channel_note = " x 2 channels (tonal+noise)" if noise_active else ""
-    print(f"\n--- measuring sensitivity ({N_BANDS} bands{channel_note}, perturbation ±{PERTURBATION_DB} dB) ---")
+    print(f"\n--- measuring sensitivity ({config.N_BANDS} bands{channel_note}, perturbation ±{config.PERTURBATION_DB} dB) ---")
     priorities_map = {name: t.priority for name, t in targets.items()}
     sensitivity_matrix = measure_sensitivity(tonal_audio, fs, noise_audio=noise_audio, priorities=priorities_map)
     relevance = compute_band_relevance(sensitivity_matrix, targets)
@@ -707,7 +823,8 @@ def main():
         print(f"  {channel:<6} band {band} ({band_label:<15}) relevance = {relevance[idx]:.3f}")
 
     active_bands = select_bands(
-        relevance, RELEVANCE_RATIO_THRESHOLD, MIN_ACTIVE_BANDS, MAX_ACTIVE_BANDS, noise_active=noise_active
+        relevance, config.RELEVANCE_RATIO_THRESHOLD, config.MIN_ACTIVE_BANDS, config.MAX_ACTIVE_BANDS,
+        noise_active=noise_active
     )
     active_labels = [candidate_label(idx, noise_active) for idx in active_bands]
     print(f"\nsearching only the top {len(active_bands)} candidates: {list(zip(active_bands.tolist(), active_labels))}")
@@ -719,10 +836,10 @@ def main():
     t0 = time.time()
     probe(np.zeros(len(active_bands)))
     seconds_per_eval = time.time() - t0
-    est_evals = (len(active_bands) + 1) + 2 * MAX_ITER
+    est_evals = (len(active_bands) + 1) + 2 * config.MAX_ITER
     print(
         f"\n~{seconds_per_eval:.1f}s per evaluation -> up to ~{est_evals * seconds_per_eval / 60:.1f} min "
-        f"worst case for {MAX_ITER} iterations across {len(active_bands)} active candidates "
+        f"worst case for {config.MAX_ITER} iterations across {len(active_bands)} active candidates "
         "(often stops earlier; a limiter-range retry, if triggered, adds up to "
         "another pass on top). Ctrl+C to abort.\n"
     )
@@ -762,7 +879,7 @@ def main():
     # upstream of this corrects for the level shift a spectral edit
     # causes as a side effect -- see loudness_match.py's module docstring.
     loudness_info = None
-    if MATCH_SOURCE_LOUDNESS:
+    if config.MATCH_SOURCE_LOUDNESS:
         source_loudness = measure_integrated_loudness(starting_audio, fs)
         loudness_result = match_loudness(final_edited, fs, source_loudness)
         final_edited = loudness_result["matched_audio"]
@@ -775,14 +892,18 @@ def main():
             # loop, same convention as run_priority_optimizer/refine_attack.
             final_achieved = analyse(final_edited, fs)
 
-    print_run_summary(
+    sf.write(config.OUTPUT_AUDIO_PATH, final_edited, fs)
+
+    run_report = build_run_report(
         targets, starting_achieved, final_achieved, edges,
         active_bands, relevance, best_gains, escalated_band_ids,
-        noise_active=noise_active, attack_info=attack_info, loudness_info=loudness_info,
+        noise_active=noise_active, converged=result.success, convergence_message=result.message,
+        attack_info=attack_info, loudness_info=loudness_info, output_audio_path=config.OUTPUT_AUDIO_PATH,
     )
+    print_report(run_report)
+    print(f"\nedited audio written to: {config.OUTPUT_AUDIO_PATH}")
 
-    sf.write(OUTPUT_AUDIO_PATH, final_edited, fs)
-    print(f"\nedited audio written to: {OUTPUT_AUDIO_PATH}")
+    return run_report
 
 
 if __name__ == "__main__":

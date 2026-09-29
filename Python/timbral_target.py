@@ -7,7 +7,7 @@ This script does NOT edit or synthesise anything yet. It answers one question:
 "given a candidate sound, and a set of target ranges + priorities for the
 7 timbral parameters, how far off is it, and where?"
 
-That "how far off" number is what a future optimizer (Nelder-Mead / CMA-ES)
+That "how far off" number is what a future optimiser (Nelder-Mead / CMA-ES)
 will try to minimise by changing the spectrum. Building and testing the
 objective function on its own first means we can trust the score before we
 ever start editing audio with it.
@@ -43,7 +43,13 @@ from timbral_models import (
     timbral_booming,
 )
 
-from config import TONAL_AUDIO_PATH, TARGETS, PRIORITIES, TARGET_MODE
+import config
+
+# config.py's values are read live via `config.X` at the point of use,
+# never cached into a module-level name here -- see spectral_optimizer.py's
+# equivalent note for why (the short version: OSC can rewrite config.py's
+# attributes at any time between runs -- see osc_interface_Max.py -- and a
+# name bound once at import time would silently stop tracking that).
 
 
 # ============================================================
@@ -102,19 +108,24 @@ class TimbralTarget:
 
     def weighted_error(self, achieved: float) -> float:
         """Normalised, squared, priority-weighted error -- what the future
-        optimizer will actually minimise the sum of."""
+        optimiser will actually minimise the sum of."""
         normalised = self.raw_error(achieved) / MODEL_OUTPUT_RANGE
         return self.priority * (normalised ** 2)
 
 
-def build_targets(targets=TARGETS, priorities=PRIORITIES, mode=None, baseline=None) -> dict:
+def build_targets(targets=None, priorities=None, mode=None, baseline=None) -> dict:
     """Turn the CONFIG dicts into TimbralTarget objects, keyed by name.
+
+    targets/priorities/mode all default to config.TARGETS/config.PRIORITIES/
+    config.TARGET_MODE -- resolved INSIDE the body (via `is None`), not as
+    literal default values, so a call that omits them always picks up
+    whatever config currently holds (see this file's config-access note
+    up top), not whatever it held when this function was defined.
 
     mode: "absolute" (targets are literal 0-100 bands) or "relative"
     (targets are (delta_min, delta_max) offsets from the SOURCE AUDIO's
     own value for that parameter -- e.g. hardness=(-40, -30) means
-    "30 to 40 points lower than the source sound's hardness"). Defaults
-    to TARGET_MODE from config.py if not given.
+    "30 to 40 points lower than the source sound's hardness").
 
     In relative mode, baseline (a dict of {name: achieved_value}, from
     analysing the unedited source audio) is required. Resolved bands are
@@ -122,7 +133,9 @@ def build_targets(targets=TARGETS, priorities=PRIORITIES, mode=None, baseline=No
     delta like (-100, 100) still resolves to "don't care" regardless of
     the source's value -- same convention as absolute mode's (0, 100).
     """
-    mode = mode or TARGET_MODE
+    targets = config.TARGETS if targets is None else targets
+    priorities = config.PRIORITIES if priorities is None else priorities
+    mode = mode or config.TARGET_MODE
     if mode == "relative" and baseline is None:
         raise ValueError(
             "build_targets(mode='relative') requires baseline= "
@@ -158,7 +171,7 @@ def describe_target_resolution(targets_raw: dict, mode: str = None, baseline: di
     since the resolved band depends on the source audio's own values --
     this is what lets you check the resolution matches what you intended
     before trusting the rest of the run."""
-    mode = mode or TARGET_MODE
+    mode = mode or config.TARGET_MODE
     print(f"Target mode: {mode}")
     for name, (a, b) in targets_raw.items():
         lo, hi = min(a, b), max(a, b)
@@ -210,7 +223,7 @@ def analyse(audio: np.ndarray, fs: int, priorities: dict = None) -> dict:
     None (the default) computes all 7 unconditionally, which is what you
     want for a one-off/diagnostic read (e.g. this module's own main(), or
     sensitivity_analysis.py run standalone) where seeing every value
-    matters more than the small time saving. The optimizers' hot loops
+    matters more than the small time saving. The optimisers' hot loops
     (spectral_optimizer.py, priority_optimizer.py) pass priorities=targets'
     priority map explicitly, since that's where the repeated cost -- and
     therefore the payoff -- actually is.
@@ -229,7 +242,7 @@ def analyse(audio: np.ndarray, fs: int, priorities: dict = None) -> dict:
 
 
 def total_error(targets: dict, achieved: dict) -> float:
-    """Single scalar a future optimizer minimises. Skips priority<=0
+    """Single scalar a future optimiser minimises. Skips priority<=0
     parameters explicitly (rather than relying on weighted_error's
     multiply-by-zero) so it's also safe when analyse() was called with
     priority-based skipping and achieved[name] is None for those."""
@@ -282,13 +295,13 @@ def report(targets: dict, achieved: dict):
 
 
 def main():
-    if not os.path.exists(TONAL_AUDIO_PATH):
-        raise FileNotFoundError(f"TONAL_AUDIO_PATH not found: {TONAL_AUDIO_PATH}")
+    if not os.path.exists(config.TONAL_AUDIO_PATH):
+        raise FileNotFoundError(f"TONAL_AUDIO_PATH not found: {config.TONAL_AUDIO_PATH}")
 
-    audio, fs = load_tonal(TONAL_AUDIO_PATH)
+    audio, fs = load_tonal(config.TONAL_AUDIO_PATH)
     achieved = analyse(audio, fs)
-    targets = build_targets(TARGETS, PRIORITIES, baseline=achieved)
-    describe_target_resolution(TARGETS, TARGET_MODE, achieved)
+    targets = build_targets(config.TARGETS, config.PRIORITIES, baseline=achieved)
+    describe_target_resolution(config.TARGETS, config.TARGET_MODE, achieved)
     print()
     report(targets, achieved)
 

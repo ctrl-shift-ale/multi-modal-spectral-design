@@ -30,7 +30,10 @@ that file, then re-run main.py.
 import numpy as np
 import pyloudnorm
 
-from config import LOUDNESS_MATCH_PEAK_CEILING_DBFS
+import config
+
+# config.py's values are read live via `config.X` at the point of use --
+# see spectral_optimizer.py's equivalent note for why.
 
 # ITU-R BS.1770's own absolute silence gate (Gamma_a in the spec, and in
 # pyloudnorm's meter.py) -- reused here as the threshold below which a
@@ -94,7 +97,7 @@ def match_loudness(audio: np.ndarray, fs: int, target_lufs: float) -> dict:
     ideal_gain_linear = 10.0 ** (ideal_gain_db / 20.0)
 
     peak = float(np.max(np.abs(audio))) if len(audio) else 0.0
-    ceiling_linear = 10.0 ** (LOUDNESS_MATCH_PEAK_CEILING_DBFS / 20.0)
+    ceiling_linear = 10.0 ** (config.LOUDNESS_MATCH_PEAK_CEILING_DBFS / 20.0)
 
     peak_limited = False
     applied_gain_linear = ideal_gain_linear

@@ -33,18 +33,11 @@ that file, then re-run priority_optimizer.py / main.py.
 
 import numpy as np
 
-from config import (
-    ATTACK_ENVELOPE_HOP_MS,
-    ATTACK_ENVELOPE_WINDOW_MS,
-    ATTACK_ONSET_THRESHOLD_FRAC,
-    ATTACK_PEAK_SEARCH_MAX_MS,
-    ATTACK_CENTROID_WINDOW_MS,
-    DEFAULT_XFADE_DURATION_MS,
-    DECAY_STABILIZATION_TOLERANCE_DB,
-    DECAY_STABILIZATION_HOLD_MS,
-    DECAY_SEARCH_MAX_MS,
-)
+import config
 from spectral_optimizer import apply_band_gains, db_to_linear
+
+# config.py's values are read live via `config.X` at the point of use --
+# see spectral_optimizer.py's equivalent note for why.
 
 
 # ============================================================
@@ -52,8 +45,8 @@ from spectral_optimizer import apply_band_gains, db_to_linear
 # All the values that WOULD normally need editing live in config.py.
 # ============================================================
 
-def compute_envelope(audio: np.ndarray, fs: int, hop_ms: float = ATTACK_ENVELOPE_HOP_MS,
-                      window_ms: float = ATTACK_ENVELOPE_WINDOW_MS) -> tuple:
+def compute_envelope(audio: np.ndarray, fs: int, hop_ms: float = None,
+                      window_ms: float = None) -> tuple:
     """Overlapping RMS envelope: each estimate averages `window_ms` of
     audio (window_ms >= hop_ms, so estimates overlap), stepped every
     `hop_ms`. The overlap matters -- see ATTACK_ENVELOPE_WINDOW_MS's
@@ -63,7 +56,14 @@ def compute_envelope(audio: np.ndarray, fs: int, hop_ms: float = ATTACK_ENVELOPE
     envelope movement. Returns (envelope_linear, envelope_db, hop_samples)
     -- linear for threshold-fraction comparisons (onset, peak), dB for the
     decay-stabilisation tolerance check, since that's naturally a
-    perceptual (log) comparison."""
+    perceptual (log) comparison.
+
+    hop_ms/window_ms default to config.ATTACK_ENVELOPE_HOP_MS/WINDOW_MS --
+    resolved INSIDE the body, not as literal default values, so a call
+    that omits them always picks up whatever config currently holds (see
+    this file's config-access note up top)."""
+    hop_ms = config.ATTACK_ENVELOPE_HOP_MS if hop_ms is None else hop_ms
+    window_ms = config.ATTACK_ENVELOPE_WINDOW_MS if window_ms is None else window_ms
     hop_samples = max(1, int(round(hop_ms / 1000.0 * fs)))
     window_samples = max(hop_samples, int(round(window_ms / 1000.0 * fs)))
     n_hops = max(1, int(np.ceil(len(audio) / hop_samples)))
@@ -114,13 +114,13 @@ def detect_attack_and_decay(audio: np.ndarray, fs: int) -> dict:
     hop_ms = hop_samples / fs * 1000.0
 
     peak_rms = float(np.max(envelope_linear)) if len(envelope_linear) else 0.0
-    onset_threshold = ATTACK_ONSET_THRESHOLD_FRAC * peak_rms
+    onset_threshold = config.ATTACK_ONSET_THRESHOLD_FRAC * peak_rms
 
     onset_hops = np.where(envelope_linear >= onset_threshold)[0]
     attack_start_hop = int(onset_hops[0]) if len(onset_hops) else 0
     attack_start_idx = attack_start_hop * hop_samples
 
-    peak_search_hops = max(1, int(round(ATTACK_PEAK_SEARCH_MAX_MS / hop_ms)))
+    peak_search_hops = max(1, int(round(config.ATTACK_PEAK_SEARCH_MAX_MS / hop_ms)))
     search_end_hop = min(len(envelope_linear), attack_start_hop + peak_search_hops + 1)
     if search_end_hop > attack_start_hop:
         peak_hop = attack_start_hop + int(np.argmax(envelope_linear[attack_start_hop:search_end_hop]))
@@ -129,8 +129,8 @@ def detect_attack_and_decay(audio: np.ndarray, fs: int) -> dict:
     peak_idx = peak_hop * hop_samples
 
     # -- decay-stabilisation search --
-    hold_hops = max(1, int(round(DECAY_STABILIZATION_HOLD_MS / hop_ms)))
-    decay_search_end_hop = min(len(envelope_db), peak_hop + int(round(DECAY_SEARCH_MAX_MS / hop_ms)) + 1)
+    hold_hops = max(1, int(round(config.DECAY_STABILIZATION_HOLD_MS / hop_ms)))
+    decay_search_end_hop = min(len(envelope_db), peak_hop + int(round(config.DECAY_SEARCH_MAX_MS / hop_ms)) + 1)
 
     decay_detected = False
     stabilised_hop = None
@@ -143,7 +143,7 @@ def detect_attack_and_decay(audio: np.ndarray, fs: int) -> dict:
         # keeps smoothly drifting (e.g. a slow swell), which would get
         # mistaken for a stabilised plateau one hop at a time. The window's
         # total range catches that cumulative drift correctly.
-        if (np.max(window) - np.min(window)) <= DECAY_STABILIZATION_TOLERANCE_DB:
+        if (np.max(window) - np.min(window)) <= config.DECAY_STABILIZATION_TOLERANCE_DB:
             stabilised_hop = i
             decay_detected = True
             break
@@ -151,13 +151,13 @@ def detect_attack_and_decay(audio: np.ndarray, fs: int) -> dict:
     decay_end_idx = stabilised_hop * hop_samples if decay_detected else None
     decay_length_ms = (stabilised_hop - peak_hop) * hop_ms if decay_detected else 0.0
 
-    if decay_detected and decay_length_ms >= DEFAULT_XFADE_DURATION_MS:
+    if decay_detected and decay_length_ms >= config.DEFAULT_XFADE_DURATION_MS:
         xfade_start_idx = peak_idx
         xfade_duration_samples = int(round(decay_length_ms / 1000.0 * fs))
         used_fallback = False
     else:
-        xfade_start_idx = attack_start_idx + int(round(ATTACK_CENTROID_WINDOW_MS / 1000.0 * fs))
-        xfade_duration_samples = int(round(DEFAULT_XFADE_DURATION_MS / 1000.0 * fs))
+        xfade_start_idx = attack_start_idx + int(round(config.ATTACK_CENTROID_WINDOW_MS / 1000.0 * fs))
+        xfade_duration_samples = int(round(config.DEFAULT_XFADE_DURATION_MS / 1000.0 * fs))
         used_fallback = True
 
     # keep the window inside the signal -- a short test clip or a source

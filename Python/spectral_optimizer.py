@@ -28,16 +28,21 @@ from scipy.signal import stft, istft
 from scipy.optimize import minimize
 
 from timbral_target import (
-    TONAL_AUDIO_PATH,
-    TARGETS,
-    PRIORITIES,
-    TARGET_MODE,
     build_targets,
     describe_target_resolution,
     analyse,
     total_error,
 )
-from config import N_BANDS, FMIN_HZ, IDEAL_GAIN_MIN_DB, IDEAL_GAIN_MAX_DB, NELDER_MEAD_STEP_DB, MAX_ITER, FATOL, XATOL, NPERSEG, NOVERLAP, OUTPUT_AUDIO_PATH
+import config
+
+# config.py's values (N_BANDS, MAX_ITER, and everything else below) are
+# read live via `config.X` at the point of use throughout this file,
+# NEVER imported by name into a module-level constant here -- a plain
+# `from config import X` binds a snapshot at import time, and once the
+# OSC interface can rewrite config.py's attributes on the fly (see
+# osc_interface_Max.py), a cached snapshot would silently stop tracking
+# the value Max last set. `import config` + `config.X` always reads
+# whatever is current at call time instead.
 
 
 # ============================================================
@@ -45,8 +50,15 @@ from config import N_BANDS, FMIN_HZ, IDEAL_GAIN_MIN_DB, IDEAL_GAIN_MAX_DB, NELDE
 # All the values that WOULD normally need editing live in config.py.
 # ============================================================
 
-def band_edges(fs: int, n_bands: int = N_BANDS, fmin: float = FMIN_HZ) -> np.ndarray:
-    """N_BANDS+1 log-spaced edges from fmin to Nyquist."""
+def band_edges(fs: int, n_bands: int = None, fmin: float = None) -> np.ndarray:
+    """N_BANDS+1 log-spaced edges from fmin to Nyquist. n_bands/fmin
+    default to config.N_BANDS/config.FMIN_HZ -- resolved INSIDE the body,
+    not as literal default values, so a call that omits them always picks
+    up whatever config currently holds rather than whatever it held the
+    moment this function was defined (see this file's config-access note
+    up top)."""
+    n_bands = config.N_BANDS if n_bands is None else n_bands
+    fmin = config.FMIN_HZ if fmin is None else fmin
     nyquist = fs / 2
     return np.geomspace(fmin, nyquist, n_bands + 1)
 
@@ -98,14 +110,14 @@ def apply_band_gains(audio: np.ndarray, fs: int, gains: np.ndarray) -> np.ndarra
     dB -- everywhere else in the pipeline works in dB, so convert with
     db_to_linear() first if that's what you're holding."""
     edges = band_edges(fs, len(gains))
-    f, _, Zxx = stft(audio, fs=fs, nperseg=NPERSEG, noverlap=NOVERLAP)
+    f, _, Zxx = stft(audio, fs=fs, nperseg=config.NPERSEG, noverlap=config.NOVERLAP)
 
     band_idx = np.digitize(f, edges) - 1
     band_idx = np.clip(band_idx, 0, len(gains) - 1)
     gain_per_bin = gains[band_idx]
 
     Zxx_edited = Zxx * gain_per_bin[:, None]
-    _, edited = istft(Zxx_edited, fs=fs, nperseg=NPERSEG, noverlap=NOVERLAP)
+    _, edited = istft(Zxx_edited, fs=fs, nperseg=config.NPERSEG, noverlap=config.NOVERLAP)
 
     # ISTFT can return a slightly different length than the input due to
     # framing -- trim or zero-pad back to match so downstream length checks
@@ -188,8 +200,8 @@ def run_optimizer(tonal_audio: np.ndarray, fs: int, targets: dict):
     (best_gains_db, best_edited_audio, best_error, achieved_dict)."""
     objective = make_objective(tonal_audio, fs, targets)
 
-    x0 = np.zeros(N_BANDS)
-    bounds = [(IDEAL_GAIN_MIN_DB, IDEAL_GAIN_MAX_DB)] * N_BANDS
+    x0 = np.zeros(config.N_BANDS)
+    bounds = [(config.IDEAL_GAIN_MIN_DB, config.IDEAL_GAIN_MAX_DB)] * config.N_BANDS
 
     history = []
 
@@ -205,8 +217,8 @@ def run_optimizer(tonal_audio: np.ndarray, fs: int, targets: dict):
         bounds=bounds,
         callback=callback,
         options={
-            "maxiter": MAX_ITER, "fatol": FATOL, "xatol": XATOL,
-            "initial_simplex": build_initial_simplex(x0, NELDER_MEAD_STEP_DB, bounds),
+            "maxiter": config.MAX_ITER, "fatol": config.FATOL, "xatol": config.XATOL,
+            "initial_simplex": build_initial_simplex(x0, config.NELDER_MEAD_STEP_DB, bounds),
         },
     )
 
@@ -222,15 +234,15 @@ def main():
     import time
     from timbral_target import load_tonal, report
 
-    if not TONAL_AUDIO_PATH.exists():
-        raise FileNotFoundError(f"TONAL_AUDIO_PATH not found: {TONAL_AUDIO_PATH}")
+    if not config.TONAL_AUDIO_PATH.exists():
+        raise FileNotFoundError(f"TONAL_AUDIO_PATH not found: {config.TONAL_AUDIO_PATH}")
 
-    tonal_audio, fs = load_tonal(TONAL_AUDIO_PATH)
+    tonal_audio, fs = load_tonal(config.TONAL_AUDIO_PATH)
 
     print("--- before optimisation ---")
     starting_achieved = analyse(tonal_audio, fs)
-    targets = build_targets(TARGETS, PRIORITIES, baseline=starting_achieved)
-    describe_target_resolution(TARGETS, TARGET_MODE, starting_achieved)
+    targets = build_targets(config.TARGETS, config.PRIORITIES, baseline=starting_achieved)
+    describe_target_resolution(config.TARGETS, config.TARGET_MODE, starting_achieved)
     print()
     report(targets, starting_achieved)
 
@@ -239,22 +251,22 @@ def main():
     # regular objective evaluation, so it isn't wasted.
     probe_objective = make_objective(tonal_audio, fs, targets)
     t0 = time.time()
-    probe_objective(np.zeros(N_BANDS))
+    probe_objective(np.zeros(config.N_BANDS))
     seconds_per_eval = time.time() - t0
 
     # Nelder-Mead needs N_BANDS+1 evaluations just for its starting simplex;
     # each further iteration typically costs roughly one more evaluation,
     # occasionally two or three (reflect/expand/contract). This is a rough
     # worst-case, not a promise -- fatol/xatol often stop it earlier.
-    est_worst_case_evals = (N_BANDS + 1) + 2 * MAX_ITER
+    est_worst_case_evals = (config.N_BANDS + 1) + 2 * config.MAX_ITER
     est_seconds = est_worst_case_evals * seconds_per_eval
     print(
         f"\n~{seconds_per_eval:.1f}s per evaluation -> up to ~{est_seconds/60:.1f} min "
-        f"worst case for {MAX_ITER} iterations across {N_BANDS} bands "
+        f"worst case for {config.MAX_ITER} iterations across {config.N_BANDS} bands "
         "(often stops earlier). Ctrl+C to abort.\n"
     )
 
-    print(f"--- optimising ({N_BANDS} bands, up to {MAX_ITER} iterations) ---")
+    print(f"--- optimising ({config.N_BANDS} bands, up to {config.MAX_ITER} iterations) ---")
     best_gains, best_edited, best_error, best_achieved, result = run_optimizer(
         tonal_audio, fs, targets
     )
@@ -265,8 +277,8 @@ def main():
     print(f"\nconverged: {result.success}  ({result.message})")
     print("band gains, dB:", np.round(best_gains, 2))
 
-    sf.write(OUTPUT_AUDIO_PATH, best_edited, fs)
-    print(f"\nedited audio written to: {OUTPUT_AUDIO_PATH}")
+    sf.write(config.OUTPUT_AUDIO_PATH, best_edited, fs)
+    print(f"\nedited audio written to: {config.OUTPUT_AUDIO_PATH}")
 
 
 if __name__ == "__main__":
