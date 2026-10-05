@@ -124,6 +124,9 @@ _SCALAR_SPECS = {
     "WARMSTART_BANDS": _scalar("int", int),
     "WARMSTART_MAX_ITER": _scalar("int", int),
 
+    # Targets & priorities
+    "TARGET_CENTERING_PULL": _scalar("float", float),
+
     # Sensitivity analysis
     "PERTURBATION_DB": _scalar("float", float),
 
@@ -263,6 +266,7 @@ def set(name: str, raw_value) -> None:
             config.PRIORITIES[param] = value
         else:
             lo, hi = config.TARGETS[param]
+            lo, hi = float(lo), float(hi)
             config.TARGETS[param] = (value, hi) if side == "min" else (lo, value)
         return
 
@@ -277,7 +281,7 @@ def describe(name: str) -> dict:
     if name in _SCALAR_SPECS:
         value = get(name)
         if isinstance(value, Path):
-            value = str(value)
+            value = value.as_posix()
         return {"name": name, "type": _SCALAR_SPECS[name]["type"], "value": value}
     if name in _TARGET_SPECS:
         return {"name": name, "type": "float", "value": get(name)}

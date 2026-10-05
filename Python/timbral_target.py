@@ -99,12 +99,32 @@ class TimbralTarget:
         return True  # placeholder, set properly in .evaluate()
 
     def raw_error(self, achieved: float) -> float:
-        """Deadzone error: 0 inside the band, distance outside it."""
+        """Deadzone error outside the band (distance past the nearest
+        edge), plus a small secondary bias INSIDE it that's 0 exactly at
+        the band's center and rises toward either edge: without this, the
+        deadzone is completely flat for any in-band value, so Nelder-Mead
+        has no gradient telling it 65 beats 60.01 once it's past the
+        target_min edge of a 60-70 band -- it just stops as soon as it
+        clears the boundary (see config.TARGET_CENTERING_PULL's comment).
+
+        The in-band bias is capped at config.TARGET_CENTERING_PULL (raw
+        units, same scale as the out-of-band distance above) at the
+        edges, scaled by this band's own half-width -- so it's always a
+        small nudge relative to actually being out of range, never a
+        reason to sacrifice a real target. Set TARGET_CENTERING_PULL to
+        0.0 to go back to the old "anywhere in the band is equally good"
+        behaviour."""
         if achieved > self.target_max:
             return achieved - self.target_max
         if achieved < self.target_min:
             return self.target_min - achieved
-        return 0.0
+        pull = config.TARGET_CENTERING_PULL
+        half_width = (self.target_max - self.target_min) / 2.0
+        if pull <= 0.0 or half_width <= 0.0:
+            return 0.0
+        center = (self.target_min + self.target_max) / 2.0
+        normalised_offset = abs(achieved - center) / half_width  # 0 at center, 1 at either edge
+        return pull * normalised_offset
 
     def weighted_error(self, achieved: float) -> float:
         """Normalised, squared, priority-weighted error -- what the future

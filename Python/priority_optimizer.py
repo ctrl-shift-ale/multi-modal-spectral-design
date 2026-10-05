@@ -32,6 +32,7 @@ that file, then re-run main.py.
 """
 
 import time
+from pathlib import Path
 
 import numpy as np
 import soundfile as sf
@@ -555,7 +556,15 @@ def build_run_report(targets, starting_achieved, best_achieved, edges,
         val = best_achieved.get(name)
         hit = None
         if val is not None:
-            hit = (t.target_min <= val <= t.target_max) if t.priority > 0 else None
+            # bool(...) matters here: val/target_min/target_max can mix in a
+            # numpy float (from best_achieved), and a chained comparison
+            # against one produces a numpy bool scalar rather than a plain
+            # Python bool -- harmless everywhere except json.dumps() below,
+            # which only accepts the real builtin bool and raises "Object of
+            # type bool is not JSON serializable" otherwise (numpy's scalar
+            # bool type's class name prints as plain "bool", which is what
+            # makes that error look like it's complaining about a real bool).
+            hit = bool(t.target_min <= val <= t.target_max) if t.priority > 0 else None
         parameters.append({
             "name": name,
             "source": src,
@@ -628,7 +637,7 @@ def build_run_report(targets, starting_achieved, best_achieved, edges,
 
     return {
         "mode": "edit",
-        "converged": converged,
+        "converged": bool(converged) if converged is not None else None,
         "convergence_message": convergence_message,
         "total_error": total_error(targets, best_achieved),
         "parameters": parameters,
@@ -636,7 +645,7 @@ def build_run_report(targets, starting_achieved, best_achieved, edges,
         "bands_not_selected": n_candidates - len(active_bands),
         "attack_refinement": attack_refinement,
         "loudness_match": loudness_match,
-        "output_audio_path": str(output_audio_path) if output_audio_path is not None else None,
+        "output_audio_path": Path(output_audio_path).as_posix() if output_audio_path is not None else None,
     }
 
 
@@ -646,8 +655,8 @@ def build_scan_report(achieved: dict, fs: int, noise_active: bool) -> dict:
     no targets/search/output file to report since scan mode has none."""
     return {
         "mode": "scan",
-        "tonal_source": str(config.TONAL_AUDIO_PATH),
-        "noise_source": str(config.NOISE_AUDIO_PATH) if noise_active else None,
+        "tonal_source": config.TONAL_AUDIO_PATH.as_posix(),
+        "noise_source": config.NOISE_AUDIO_PATH.as_posix() if noise_active else None,
         "sample_rate_hz": fs,
         "parameters": [{"name": name, "value": achieved[name]} for name in PARAM_NAMES],
     }

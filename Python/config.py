@@ -61,7 +61,7 @@ OUTPUT_AUDIO_PATH = REPO_ROOT / "samples" / "Deconstructed" / "Bassoon_A3_MF" / 
 #            analysis, priority-aware band selection, and the Nelder-Mead
 #            search against TARGETS/PRIORITIES below, writing the result
 #            to OUTPUT_AUDIO_PATH. This is the original, default behaviour.
-MODE = "edit"   # "scan" or "edit"
+MODE = "scan"   # "scan" or "edit"
 assert MODE in ("scan", "edit"), f"MODE must be 'scan' or 'edit', got {MODE!r}"
 
 
@@ -88,7 +88,7 @@ assert MODE in ("scan", "edit"), f"MODE must be 'scan' or 'edit', got {MODE!r}"
 # Order within a tuple doesn't matter in either mode -- (-40, -30) and
 # (-30, -40) resolve identically.
 # ------------------------------------------------------------
-TARGET_MODE = "relative"   # <-- change to "relative" to use the deltas below
+TARGET_MODE = "absolute"   # <-- change to "relative" to use the deltas below
 
 
 # STEP 2: fill in TARGETS to match whichever mode you picked above. Only
@@ -98,7 +98,7 @@ TARGET_MODE = "relative"   # <-- change to "relative" to use the deltas below
 # and set TARGET_MODE to match.
 
 # --- ABSOLUTE example (active by default) ---
-TARGETS = {
+TARGETS: dict[str, tuple[float, float]] = {
     "warmth":     (0, 100),
     "brightness": (0, 100),
     "depth":      (0, 100),
@@ -129,7 +129,7 @@ TARGETS = {
 # on a high-priority one. (A strict "never sacrifice hardness for
 # sharpness" guarantee would need a different, lexicographic scheme --
 # not implemented.)
-PRIORITIES = {
+PRIORITIES: dict[str, float] = {
     "warmth":     0.0,
     "brightness": 0.0,
     "depth":      0.0,
@@ -139,6 +139,23 @@ PRIORITIES = {
     "booming":    0.0,
 }
 
+# A target band like (60, 70) is a DEADZONE -- 0 error anywhere from 60 to
+# 70, with nothing distinguishing 60.01 from 65. That's deliberate for the
+# hard pass/fail "hit" check (either value counts), but it also means the
+# search itself has no reason to keep moving once it clears the nearer
+# edge -- it'll happily stop at 60.01 even though 65 (the center) is
+# obviously the more robust place to land.
+#
+# TARGET_CENTERING_PULL adds a small secondary bias INSIDE an already-hit
+# band: 0 exactly at the band's center, rising to this many raw points
+# (same 0-100 scale the 7 timbral models report on) at either edge. It's
+# intentionally small relative to actually missing a target -- e.g. the
+# default of 2.0 is worth about the same as being 2 points outside the
+# band, so the search will never trade away a real target just to center
+# a less important one, but it WILL keep refining a band it's already
+# inside rather than stopping the moment it crosses the boundary. Set to
+# 0.0 to go back to "anywhere in the band is equally acceptable".
+TARGET_CENTERING_PULL: float = 2.0
 
 # ============================================================
 # Spectral band structure (spectral_optimizer.py, sensitivity_analysis.py,
